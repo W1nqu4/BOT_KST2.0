@@ -1,0 +1,359 @@
+"""Слой работы с базой данных (SQLite).
+
+Весь остальной код обращается к SQLite только через этот модуль (и через
+``bot/migrations.py`` для схемы). Параметры подключения:
+
+- ``isolation_level=None`` — явное управление транзакциями (BEGIN/COMMIT),
+  благодаря чему ``transaction()`` корректно работает и с DDL, и с DML;
+- ``row_factory=sqlite3.Row`` — доступ к полям строк по имени колонки;
+- ``PRAGMA foreign_keys=ON`` — контроль внешних ключей;
+- ``PRAGMA journal_mode=WAL`` — устойчивый к сбоям журнал (для ``:memory:``
+  SQLite сам вернёт режим memory, это не ошибка).
+"""
+
+import os
+import sqlite3
+from collections.abc import Iterator
+from contextlib import contextmanager
+from pathlib import Path
+
+from bot.config import DEFAULT_DB_PATH
+
+
+def _resolve_db_path(db_path: str | Path | None) -> str | Path:
+    """Путь к БД: явный аргумент → env DB_PATH → значение по умолчанию из config."""
+    if db_path is not None and str(db_path).strip():
+        return db_path
+    return os.environ.get("DB_PATH", "").strip() or DEFAULT_DB_PATH
+
+
+def get_connection(db_path: str | Path | None = None) -> sqlite3.Connection:
+    """Создать новое соединение с SQLite и включить нужные PRAGMA.
+
+    Args:
+        db_path: путь к файлу БД или ``":memory:"``. Если не задан — берётся
+            env-переменная DB_PATH (или DEFAULT_DB_PATH из :mod:`bot.config`).
+
+    Returns:
+        ``sqlite3.Connection``. Закрытие — ответственность вызывающего кода
+        (либо используйте :func:`transaction` в режиме пути).
+    """
+    path = _resolve_db_path(db_path)
+    if str(path) != ":memory:":
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(path, isolation_level=None)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("PRAGMA journal_mode = WAL")
+    return conn
+
+
+@contextmanager
+def transaction(
+    target: sqlite3.Connection | str | Path | None = None,
+) -> Iterator[sqlite3.Connection]:
+    """Транзакция: при нормальном выходе — commit, при исключении — rollback.
+
+    Два режима использования::
+
+        with transaction(conn) as c:      # для уже открытого соединения:
+            ...                           # commit/rollback, закрытие НЕ делаем
+
+        with transaction("data/bot.db"):  # контекстный менеджер сам открывает
+            ...                           # соединение и закрывает его на выходе
+                                          # (без аргумента — env DB_PATH / дефолт)
+
+    Вложенность поддерживается: если соединение уже находится в транзакции,
+    внутренняя транзакция присоединяется к внешней, а commit/rollback делает
+    внешняя.
+    """
+    if isinstance(target, sqlite3.Connection):
+        conn, owns_connection = target, False
+    else:
+        conn, owns_connection = get_connection(target), True
+    try:
+        if conn.in_transaction:
+            # Уже внутри внешней транзакции — просто работаем в ней.
+            yield conn
+            return
+        conn.execute("BEGIN")
+        try:
+            yield conn
+            conn.commit()
+        except BaseException:
+            conn.rollback()
+            raise
+    finally:
+        if owns_connection:
+            conn.close()
+def get_user(conn: sqlite3.Connection, tg_id: int) -> sqlite3.Row | None:
+    """Пользователь по ``tg_id`` или None, если его ещё нет.
+
+    Args:
+        conn: соединение SQLite.
+        tg_id: Telegram id пользователя.
+
+    Returns:
+        Строка таблицы ``users`` (поля по имени колонки) или None.
+    """
+    return conn.execute(
+        "SELECT * FROM users WHERE tg_id = ?", (tg_id,)
+    ).fetchone()
+
+
+def get_user_group(conn: sqlite3.Connection, tg_id: int) -> str | None:
+    """Имя группы пользователя или None, если он ещё не зарегистрирован.
+
+    Отсутствие пользователя и есть «группа не выбрана»: в схеме
+    ``users.group_name`` объявлен NOT NULL, поэтому записи без группы нет.
+    """
+    row = get_user(conn, tg_id)
+    if row is None:
+        return None
+    group = str(row["group_name"]).strip()
+    return group or None
+
+
+def upsert_user(conn: sqlite3.Connection, tg_id: int, group_name: str,
+                full_name: str = "", now: str | None = None) -> None:
+    """Создать пользователя или обновить его группу/имя.
+
+    Args:
+        conn: соединение SQLite.
+        tg_id: Telegram id.
+        group_name: нормализованное имя группы.
+        full_name: имя из Telegram (для админки).
+        now: момент создания в ISO; по умолчанию берётся в поясе техникума.
+    """
+    from datetime import datetime
+
+    from bot.config import TIMEZONE
+
+    created = now or datetime.now(TIMEZONE).isoformat(timespec="seconds")
+    conn.execute(
+        "INSERT INTO users (tg_id, group_name, full_name, is_active, created_at)"
+        " VALUES (?, ?, ?, 1, ?)"
+        " ON CONFLICT(tg_id) DO UPDATE SET"
+        "   group_name = excluded.group_name,"
+        "   full_name = excluded.full_name,"
+        "   is_active = 1",
+        (tg_id, group_name, full_name, created),
+    )
+
+
+def list_available_groups(conn: sqlite3.Connection) -> list[str]:
+    """Уникальные имена групп из кэша расписания (для проверки ввода).
+
+    Returns:
+        Отсортированный список групп; пустой, если кэш ещё не заполнен.
+    """
+    rows = conn.execute(
+        "SELECT DISTINCT group_name FROM schedule_cache ORDER BY group_name"
+    ).fetchall()
+    return [str(row["group_name"]) for row in rows]
+
+
+def count_users(conn: sqlite3.Connection) -> int:
+    """Количество активных пользователей (для /stats на шаге 11)."""
+    return int(
+        conn.execute(
+            "SELECT COUNT(*) FROM users WHERE is_active = 1"
+        ).fetchone()[0]
+    )
+
+
+def get_notify_groups(conn: sqlite3.Connection) -> list[str]:
+    """Группы, у которых есть хотя бы один активный пользователь.
+
+    Нужны рассылке замен: группы без подписчиков обрабатывать незачем.
+
+    Returns:
+        Отсортированный список имён групп (пустые и NULL отброшены).
+    """
+    rows = conn.execute(
+        "SELECT DISTINCT group_name FROM users"
+        " WHERE is_active = 1 AND group_name IS NOT NULL AND group_name <> ''"
+        " ORDER BY group_name"
+    ).fetchall()
+    return [str(row["group_name"]) for row in rows]
+
+
+def get_users_by_group(conn: sqlite3.Connection, group_name: str) -> list[int]:
+    """Активные пользователи группы (для рассылки).
+
+    Returns:
+        Список ``tg_id``.
+    """
+    rows = conn.execute(
+        "SELECT tg_id FROM users WHERE group_name = ? AND is_active = 1",
+        (group_name,),
+    ).fetchall()
+    return [int(row["tg_id"]) for row in rows]
+
+
+def deactivate_user(conn: sqlite3.Connection, tg_id: int) -> None:
+    """Пометить пользователя неактивным (заблокировал бота).
+
+    Неактивные не попадают в рассылку и не считаются в статистике.
+    """
+    with transaction(conn):
+        conn.execute("UPDATE users SET is_active = 0 WHERE tg_id = ?", (tg_id,))
+
+
+def is_substitution_sent(conn: sqlite3.Connection, group_name: str,
+                         signature: str, notify_date: str) -> bool:
+    """Отправляли ли уже уведомление об этой замене в эту дату.
+
+    Дедупликация спасает от повторов: рассылка ходит каждые 15 минут, а
+    замену студент должен увидеть один раз.
+    """
+    row = conn.execute(
+        "SELECT 1 FROM sent_notifications"
+        " WHERE group_name = ? AND signature = ? AND notify_date = ?",
+        (group_name, signature, notify_date),
+    ).fetchone()
+    return row is not None
+
+
+def mark_substitution_sent(conn: sqlite3.Connection, group_name: str,
+                           signature: str, notify_date: str,
+                           sent_at: str | None = None) -> None:
+    """Отметить уведомление о замене отправленным (идемпотентно)."""
+    from datetime import datetime
+
+    from bot.config import TIMEZONE
+
+    moment = sent_at or datetime.now(TIMEZONE).isoformat(timespec="seconds")
+    with transaction(conn):
+        conn.execute(
+            "INSERT OR IGNORE INTO sent_notifications"
+            " (group_name, signature, notify_date, sent_at) VALUES (?, ?, ?, ?)",
+            (group_name, signature, notify_date, moment),
+        )
+
+
+# ==========================================================================
+# Статистика и модерация (шаг 11, для админки)
+# ==========================================================================
+
+
+def count_active_users_since(conn: sqlite3.Connection, days: int,
+                             now: str | None = None) -> int:
+    """Сколько активных пользователей появилось за последние ``days`` дней.
+
+    Считаем по ``created_at``: «активность» здесь означает недавнюю
+    регистрацию, а не последнее сообщение (истории действий мы не ведём).
+
+    Args:
+        conn: соединение SQLite.
+        days: глубина в днях.
+        now: текущий момент в ISO (для тестов).
+
+    Returns:
+        Количество пользователей.
+    """
+    from datetime import datetime, timedelta
+
+    from bot.config import TIMEZONE
+
+    moment = datetime.now(TIMEZONE) if now is None else datetime.fromisoformat(now)
+    since = (moment - timedelta(days=days)).isoformat(timespec="seconds")
+    return int(
+        conn.execute(
+            "SELECT COUNT(*) FROM users WHERE is_active = 1 AND created_at >= ?",
+            (since,),
+        ).fetchone()[0]
+    )
+
+
+def count_users_by_group(conn: sqlite3.Connection,
+                         limit: int = 10) -> list[tuple[str, int]]:
+    """Топ групп по числу активных пользователей.
+
+    Returns:
+        Список ``(группа, количество)``, отсортированный по убыванию.
+    """
+    rows = conn.execute(
+        "SELECT group_name, COUNT(*) AS total FROM users"
+        " WHERE is_active = 1 AND group_name <> ''"
+        " GROUP BY group_name ORDER BY total DESC, group_name ASC"
+        " LIMIT ?",
+        (limit,),
+    ).fetchall()
+    return [(str(row["group_name"]), int(row["total"])) for row in rows]
+
+
+def list_users_in_group(conn: sqlite3.Connection, group_name: str,
+                        limit: int = 50) -> list[dict]:
+    """Активные пользователи группы (для ``/users``).
+
+    Returns:
+        Список словарей ``{'tg_id': ..., 'full_name': ...}`` и признак
+        ``truncated`` отдельно — его считает вызывающий код через
+        :func:`count_users_in_group`.
+    """
+    rows = conn.execute(
+        "SELECT tg_id, full_name FROM users"
+        " WHERE group_name = ? AND is_active = 1"
+        " ORDER BY full_name, tg_id LIMIT ?",
+        (group_name, limit),
+    ).fetchall()
+    return [{"tg_id": int(r["tg_id"]), "full_name": str(r["full_name"] or "")}
+            for r in rows]
+
+
+def count_users_in_group(conn: sqlite3.Connection, group_name: str) -> int:
+    """Сколько активных пользователей в группе (для «и ещё N»)."""
+    return int(
+        conn.execute(
+            "SELECT COUNT(*) FROM users WHERE group_name = ? AND is_active = 1",
+            (group_name,),
+        ).fetchone()[0]
+    )
+
+
+def iter_active_users(conn: sqlite3.Connection) -> list[dict]:
+    """Все активные пользователи (для рассылки админа).
+
+    Returns:
+        Список словарей ``{'tg_id': ..., 'full_name': ..., 'group_name': ...}``.
+    """
+    rows = conn.execute(
+        "SELECT tg_id, full_name, group_name FROM users"
+        " WHERE is_active = 1 ORDER BY tg_id"
+    ).fetchall()
+    return [
+        {
+            "tg_id": int(r["tg_id"]),
+            "full_name": str(r["full_name"] or ""),
+            "group_name": str(r["group_name"] or ""),
+        }
+        for r in rows
+    ]
+
+
+def get_notifications_enabled(conn: sqlite3.Connection, tg_id: int) -> bool:
+    """Включены ли у пользователя уведомления о заменах (по умолчанию — да)."""
+    row = conn.execute(
+        "SELECT notifications_enabled FROM users WHERE tg_id = ?", (tg_id,)
+    ).fetchone()
+    if row is None:
+        return False
+    return bool(row["notifications_enabled"])
+
+
+def set_notifications_enabled(conn: sqlite3.Connection, tg_id: int,
+                              enabled: bool) -> bool:
+    """Включить/выключить уведомления пользователя.
+
+    Returns:
+        True, если пользователь найден и обновлён.
+    """
+    if get_user(conn, tg_id) is None:
+        return False
+    with transaction(conn):
+        conn.execute(
+            "UPDATE users SET notifications_enabled = ? WHERE tg_id = ?",
+            (1 if enabled else 0, tg_id),
+        )
+    return True

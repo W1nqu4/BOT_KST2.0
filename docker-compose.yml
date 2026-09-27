@@ -1,0 +1,12 @@
+# Локальный запуск: docker compose up --build
+# Для продакшена владелец выбирает хостинг сам (VPS, PaaS, k8s и т.д.).
+services:
+  bot:
+    build: .
+    env_file: .env
+    ports:
+      - "8080:8080"
+    volumes:
+      # Персистентный том: БД SQLite, кэш источников и бэкапы.
+      - ./data:/app/data
+    restart: unless-stopped

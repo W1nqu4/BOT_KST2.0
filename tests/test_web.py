@@ -1,0 +1,136 @@
+"""Тесты aiohttp-сервера: /health и /calendar/{token}.ics (шаг 9).
+
+Используется ``aiohttp.test_utils``: поднимается настоящий сервер на
+localhost, поэтому проверяются и маршрутизация, и заголовки ответа.
+"""
+
+from pathlib import Path
+
+import pytest
+from aiohttp.test_utils import TestClient, TestServer
+
+from bot.db import get_connection, transaction
+from bot.migrations import apply_migrations
+from bot.services import cache_service, deadline_service as dl
+from bot.services import ics_service
+from bot.web import CONN_KEY, SETTINGS_KEY, create_app
+
+GROUP = "26КАД"
+
+
+@pytest.fixture()
+def conn(tmp_path: Path):
+    """Соединение к БД с миграциями и зарегистрированным пользователем."""
+    c = get_connection(tmp_path / "test.db")
+    apply_migrations(c)
+    with transaction(c):
+        c.execute(
+            "INSERT INTO users (tg_id, group_name, created_at)"
+            " VALUES (1, ?, '2026-09-01T00:00:00+07:00')", (GROUP,),
+        )
+    yield c
+    c.close()
+
+
+@pytest.fixture()
+async def client(conn, parsed_schedule):
+    """Тестовый HTTP-клиент aiohttp.
+
+    ``TestServer`` работает в том же event loop, что и тест, поэтому серверу
+    передаётся то же соединение — как в приложении.
+    """
+    cache_service.save_schedule(conn, parsed_schedule)
+    server = TestServer(create_app(conn))
+    test_client = TestClient(server)
+    await test_client.start_server()
+    yield test_client
+    await test_client.close()
+
+
+# --- /health ---
+
+async def test_health_ok(client) -> None:
+    """GET /health → 200 и JSON с ожидаемыми ключами."""
+    response = await client.get("/health")
+    assert response.status == 200
+    payload = await response.json()
+
+    assert payload["status"] == "ok"
+    assert payload["db"] == "ok"
+    for key in ("schema_version", "users_count", "last_schedule_update",
+                "lessons_cached", "checked_at"):
+        assert key in payload, f"нет ключа {key}"
+    assert payload["schema_version"] == 5
+    assert payload["users_count"] == 1
+    assert payload["lessons_cached"] > 1000
+
+
+async def test_health_content_type_json(client) -> None:
+    response = await client.get("/health")
+    assert "json" in response.headers["Content-Type"]
+
+
+# --- /calendar/{token}.ics ---
+
+async def test_calendar_ok(client, conn) -> None:
+    """Валидный токен → 200, text/calendar и корректные заголовки."""
+    token = ics_service.get_or_create_token(conn, 1)
+
+    response = await client.get(f"/calendar/{token}.ics")
+    assert response.status == 200
+    assert "text/calendar" in response.headers["Content-Type"]
+    assert response.headers["Cache-Control"] == "no-cache, must-revalidate"
+    assert "X-PUBLISHED-TTL" in response.headers
+    assert "schedule.ics" in response.headers["Content-Disposition"]
+
+    body = await response.text()
+    assert body.startswith("BEGIN:VCALENDAR")
+    assert body.rstrip().endswith("END:VCALENDAR")
+    assert "BEGIN:VEVENT" in body
+
+
+async def test_calendar_invalid_token_404(client) -> None:
+    response = await client.get("/calendar/deadbeef.ics")
+    assert response.status == 404
+    assert "не найдена" in await response.text()
+
+
+async def test_calendar_empty_token_404(client) -> None:
+    """Пустой токен (маршрут не совпадёт) → 404."""
+    response = await client.get("/calendar/.ics")
+    assert response.status == 404
+
+
+async def test_calendar_user_without_group_404(client, conn) -> None:
+    """Пользователь без группы получает 404 с подсказкой."""
+    with transaction(conn):
+        conn.execute(
+            "INSERT INTO users (tg_id, group_name, created_at)"
+            " VALUES (2, '', 'x')"
+        )
+        conn.execute(
+            "INSERT INTO calendar_tokens (tg_id, token, created_at)"
+            " VALUES (2, 'nogrouptoken', 'x')"
+        )
+
+    response = await client.get("/calendar/nogrouptoken.ics")
+    assert response.status == 404
+    assert "Укажите группу" in await response.text()
+
+
+async def test_calendar_includes_deadlines(client, conn) -> None:
+    """Дедлайны пользователя попадают в его подписку."""
+    token = ics_service.get_or_create_token(conn, 1)
+    dl.add(conn, 1, "Химия", "", "Сдать курсовую", "2026-10-05")
+
+    response = await client.get(f"/calendar/{token}.ics")
+    body = await response.text()
+    assert "Сдать курсовую" in body
+
+
+async def test_calendar_no_rrule(client, conn) -> None:
+    """В подписке нет RRULE: чёт/нечет по числу месяца."""
+    token = ics_service.get_or_create_token(conn, 1)
+
+    response = await client.get(f"/calendar/{token}.ics")
+    assert "RRULE" not in await response.text()

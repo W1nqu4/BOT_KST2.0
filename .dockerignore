@@ -1,0 +1,27 @@
+.git
+.gitignore
+.venv
+venv
+__pycache__
+*.pyc
+*.pyo
+.pytest_cache
+.mypy_cache
+.ruff_cache
+
+# Секреты никогда не попадают в образ
+.env
+.env.*
+!.env.example
+
+# Данные и тесты не нужны в образе
+data/
+tests/
+*.log
+.idea
+.vscode
+README.md
+PLAN.md
+docker-compose.yml
+Dockerfile
+.dockerignore

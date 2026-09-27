@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+venv/
+.venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Секреты
+.env
+.env.*
+!.env.example
+
+# БД и кэш (персистентный том)
+data/*.db
+data/*.db-journal
+data/*.db-wal
+data/*.db-shm
+data/cache/*
+!data/cache/.gitkeep
+
+# Образцы источников: не коммитим, скачиваются заново.
+# URL — в tests/conftest.py; тесты без файлов скипаются (pytest.mark.skipif).
+data/sample_schedule.docx
+data/sample_substitutions.html
+
+# Резервные копии БД (создаются автоматически рядом с bot.db)
+data/backups/
+
+# IDE
+.idea/
+.vscode/
