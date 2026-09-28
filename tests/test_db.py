@@ -133,6 +133,181 @@ def test_group_chat_helpers(conn: sqlite3.Connection) -> None:
     assert db.get_group_chat(conn, -100500) is None
     assert db.remove_group_chat(conn, -100500) is False
 
+
+# --- история замен (шаг 3) ---
+
+SUB_HIST_ROW = {
+    "para": 2, "old_subject": "ОД.03 История",
+    "new_subject": "ОД.07 Математика",
+    "teacher": "Кудрявцева Полина Алексеевна", "room": "307А",
+    "is_cancelled": False, "is_self_study": False,
+}
+
+
+def _add_user_row(conn: sqlite3.Connection, tg_id: int,
+                  group_name: str = "26КАД") -> None:
+    """Вставить пользователя (для get_known_groups)."""
+    with transaction(conn):
+        conn.execute(
+            "INSERT INTO users (tg_id, group_name, created_at)"
+            " VALUES (?, ?, 'x')",
+            (tg_id, group_name),
+        )
+
+
+def test_save_substitution_history_inserts(conn: sqlite3.Connection) -> None:
+    """Первая запись создаётся, first_seen_at == last_seen_at."""
+    from bot import db
+
+    apply_migrations(conn)
+    saved = db.save_substitution_history(
+        conn, "26КАД", "2026-09-28", [SUB_HIST_ROW],
+        now="2026-09-28T15:00:00+07:00",
+    )
+
+    assert saved == 1
+    assert db.count_substitution_history(conn) == 1
+
+    row = conn.execute("SELECT * FROM substitution_history").fetchone()
+    assert row["group_name"] == "26КАД"
+    assert row["date_iso"] == "2026-09-28"
+    assert row["para"] == 2
+    assert row["new_subject"] == "ОД.07 Математика"
+    assert row["teacher"] == "Кудрявцева Полина Алексеевна"
+    assert row["is_cancelled"] == 0
+    assert row["is_self_study"] == 0
+    assert row["first_seen_at"] == "2026-09-28T15:00:00+07:00"
+    assert row["last_seen_at"] == "2026-09-28T15:00:00+07:00"
+
+
+def test_save_substitution_history_updates_not_duplicates(
+        conn: sqlite3.Connection) -> None:
+    """Повторная встреча той же пары обновляет last_seen_at, не дублируя."""
+    from bot import db
+
+    apply_migrations(conn)
+    db.save_substitution_history(conn, "26КАД", "2026-09-28", [SUB_HIST_ROW],
+                                 now="2026-09-28T15:00:00+07:00")
+    db.save_substitution_history(conn, "26КАД", "2026-09-28", [SUB_HIST_ROW],
+                                 now="2026-09-28T16:30:00+07:00")
+
+    assert db.count_substitution_history(conn) == 1, "дубль появился"
+    row = conn.execute("SELECT * FROM substitution_history").fetchone()
+    assert row["first_seen_at"] == "2026-09-28T15:00:00+07:00", \
+        "первое появление не должно перезаписываться"
+    assert row["last_seen_at"] == "2026-09-28T16:30:00+07:00"
+
+
+def test_save_substitution_history_updates_changed_fields(
+        conn: sqlite3.Connection) -> None:
+    """Изменённая замена (другой кабинет) обновляет поля записи."""
+    from bot import db
+
+    apply_migrations(conn)
+    db.save_substitution_history(conn, "26КАД", "2026-09-28", [SUB_HIST_ROW],
+                                 now="2026-09-28T15:00:00+07:00")
+    changed = dict(SUB_HIST_ROW, room="999", is_cancelled=True)
+    db.save_substitution_history(conn, "26КАД", "2026-09-28", [changed],
+                                 now="2026-09-28T17:00:00+07:00")
+
+    assert db.count_substitution_history(conn) == 1
+    row = conn.execute("SELECT * FROM substitution_history").fetchone()
+    assert row["room"] == "999"
+    assert row["is_cancelled"] == 1
+
+
+def test_save_substitution_history_different_para_and_date(
+        conn: sqlite3.Connection) -> None:
+    """Разные пары и даты — разные записи."""
+    from bot import db
+
+    apply_migrations(conn)
+    db.save_substitution_history(conn, "26КАД", "2026-09-28", [SUB_HIST_ROW])
+    db.save_substitution_history(conn, "26КАД", "2026-09-28",
+                                 [dict(SUB_HIST_ROW, para=3)])
+    db.save_substitution_history(conn, "26КАД", "2026-09-29", [SUB_HIST_ROW])
+
+    assert db.count_substitution_history(conn) == 3
+
+
+def test_save_substitution_history_empty_list(conn: sqlite3.Connection) -> None:
+    """Пустой список — ничего не пишем."""
+    from bot import db
+
+    apply_migrations(conn)
+    assert db.save_substitution_history(conn, "26КАД", "2026-09-28", []) == 0
+    assert db.count_substitution_history(conn) == 0
+
+
+def test_get_known_groups_only_users(conn: sqlite3.Connection) -> None:
+    """get_known_groups возвращает только группы из users, без пустых."""
+    from bot import db
+
+    apply_migrations(conn)
+    _add_user_row(conn, 111, "26КАД")
+    _add_user_row(conn, 222, "26КАД")
+    _add_user_row(conn, 333, "25КАД")
+    _add_user_row(conn, 444, "")
+    _add_user_row(conn, 555, "   ")
+
+    assert db.get_known_groups(conn) == ["25КАД", "26КАД"]
+
+
+def test_get_known_groups_empty(conn: sqlite3.Connection) -> None:
+    """Без пользователей список пуст."""
+    from bot import db
+
+    apply_migrations(conn)
+    assert db.get_known_groups(conn) == []
+
+
+def test_cleanup_substitution_history_removes_old(
+        conn: sqlite3.Connection) -> None:
+    """Очистка удаляет записи раньше границы и возвращает их количество."""
+    from bot import db
+
+    apply_migrations(conn)
+    db.save_substitution_history(conn, "26КАД", "2025-09-01", [SUB_HIST_ROW])
+    db.save_substitution_history(conn, "26КАД", "2025-12-31", [SUB_HIST_ROW])
+    db.save_substitution_history(conn, "26КАД", "2026-06-29",
+                                 [dict(SUB_HIST_ROW, para=3)])
+    db.save_substitution_history(conn, "26КАД", "2026-09-28",
+                                 [dict(SUB_HIST_ROW, para=4)])
+
+    removed = db.cleanup_substitution_history(conn, "2026-06-30")
+
+    assert removed == 3
+    assert db.count_substitution_history(conn) == 1
+    assert db.earliest_substitution_history_date(conn) == "2026-09-28"
+
+
+def test_cleanup_substitution_history_nothing_to_remove(
+        conn: sqlite3.Connection) -> None:
+    """Если старых записей нет — 0."""
+    from bot import db
+
+    apply_migrations(conn)
+    db.save_substitution_history(conn, "26КАД", "2026-09-28", [SUB_HIST_ROW])
+    assert db.cleanup_substitution_history(conn, "2026-06-30") == 0
+    assert db.count_substitution_history(conn) == 1
+
+
+def test_history_count_and_earliest(conn: sqlite3.Connection) -> None:
+    """count и earliest возвращают корректные значения; пусто → None."""
+    from bot import db
+
+    apply_migrations(conn)
+    assert db.count_substitution_history(conn) == 0
+    assert db.earliest_substitution_history_date(conn) is None
+
+    db.save_substitution_history(conn, "26КАД", "2026-09-29",
+                                 [dict(SUB_HIST_ROW, para=3)])
+    db.save_substitution_history(conn, "26КАД", "2026-09-28", [SUB_HIST_ROW])
+
+    assert db.count_substitution_history(conn) == 2
+    assert db.earliest_substitution_history_date(conn) == "2026-09-28"
+
+
 def test_insert_and_read_user(conn: sqlite3.Connection) -> None:
     apply_migrations(conn)
     _insert_user(conn)

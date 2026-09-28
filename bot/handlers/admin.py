@@ -137,12 +137,22 @@ def build_stats_text(conn, db_path: str) -> str:
     else:
         lines.append("🎓 <b>По группам:</b> пока нет данных")
 
+    history_rows = db.count_substitution_history(conn)
+    history_earliest = db.earliest_substitution_history_date(conn)
+
     lines.extend([
         f"💾 Размер БД: <b>{size}</b>",
         f"🗓 Расписание: обновлено {schedule_meta}, занятий "
         f"<b>{lessons}</b>, групп <b>{lesson_groups}</b>",
         f"🔔 Замены: обновлено {subs_meta}, строк <b>{subs}</b>",
     ])
+    if history_earliest is None:
+        lines.append("📜 История замен: пусто")
+    else:
+        lines.append(
+            f"📜 История замен: <b>{history_rows}</b> записей, "
+            f"с {escape(history_earliest)}"
+        )
     return "\n".join(lines)
 
 

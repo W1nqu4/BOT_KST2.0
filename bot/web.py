@@ -60,6 +60,8 @@ async def handle_health(request: web.Request) -> web.Response:
         lessons = conn.execute(
             "SELECT COUNT(*) FROM schedule_cache"
         ).fetchone()[0]
+        history_rows = db.count_substitution_history(conn)
+        history_earliest = db.earliest_substitution_history_date(conn)
     except Exception as exc:
         logger.exception("health check failed")
         return _json_response(
@@ -77,6 +79,8 @@ async def handle_health(request: web.Request) -> web.Response:
         "last_schedule_update": last_update,
         "last_substitutions_update": last_subs,
         "lessons_cached": int(lessons),
+        "substitution_history_rows": int(history_rows),
+        "substitution_history_earliest": history_earliest,
         "public_base_url": public_base_url,
         "checked_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     })

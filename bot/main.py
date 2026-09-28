@@ -41,6 +41,7 @@ from bot.services.schedule_service import (
     refresh_schedule_loop,
     refresh_substitutions_loop,
 )
+from bot.services.history_service import history_cleanup_loop
 from bot.utils.logging_setup import setup_logging
 from bot.utils.monitoring import health_loop
 from bot.utils.security import RateLimiter
@@ -275,6 +276,7 @@ def build_background_tasks(conn, bot, settings) -> list[asyncio.Task]:
          lambda: notify_substitutions_loop(conn, bot)),
         ("backup_loop", lambda: backup_loop(conn, settings)),
         ("health_loop", lambda: health_loop(conn, bot, settings)),
+        ("history_cleanup_loop", lambda: history_cleanup_loop(conn)),
     )
     return [asyncio.create_task(factory(), name=name)
             for name, factory in factories]

@@ -262,6 +262,59 @@ def migrate_7_group_chat_full_schedule(conn: sqlite3.Connection) -> None:
     )
 
 
+def migrate_8_substitution_history(conn: sqlite3.Connection) -> None:
+    """Миграция 7 → 8: таблица ``substitution_history`` — память замен за год.
+
+    ``substitutions_cache`` хранит только «текущий лист замен» (полностью
+    перезаписывается при каждом обновлении). История — отдельная таблица,
+    куда записи пишутся в ДОПОЛНЕНИЕ и не удаляются при обновлении листа.
+    Это заготовка под будущую фичу (аналитика замен), UI пока нет.
+
+    Пишем только для групп, у которых есть зарегистрированные пользователи
+    (см. :func:`bot.db.get_known_groups`), иначе таблица быстро распухла бы
+    на все 76 групп техникума.
+
+    Соглашения по типам — как в ``substitutions_cache``:
+    ``is_cancelled``/``is_self_study`` — INTEGER 0/1; моменты — ISO-8601.
+
+    Индексы:
+    - ``(group_name, date_iso)`` — чтение истории группы по датам;
+    - ``date_iso`` — очистка по границе учебного года и выборка earliest.
+    """
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS substitution_history (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            group_name    TEXT    NOT NULL,
+            date_iso      TEXT    NOT NULL,
+            para          INTEGER NOT NULL,
+            old_subject   TEXT,
+            new_subject   TEXT,
+            teacher       TEXT,
+            room          TEXT,
+            is_cancelled  INTEGER NOT NULL DEFAULT 0,
+            is_self_study INTEGER NOT NULL DEFAULT 0,
+            first_seen_at TEXT    NOT NULL,
+            last_seen_at  TEXT    NOT NULL
+        )
+    """)
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_sub_hist_group_date"
+        " ON substitution_history (group_name, date_iso)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_sub_hist_date"
+        " ON substitution_history (date_iso)"
+    )
+    # Уникальный индекс нужен как цель ON CONFLICT в
+    # :func:`bot.db.save_substitution_history`: без него SQLite не знает,
+    # по каким колонкам разрешать конфликт, и вставка падает с ошибкой.
+    # Это же и есть защита от дублей одной пары в один день.
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_sub_hist_uniq"
+        " ON substitution_history (group_name, date_iso, para)"
+    )
+
+
 MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     1: migrate_1_initial,
     2: migrate_2_add_self_study,
@@ -270,6 +323,7 @@ MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     5: migrate_5_notifications_enabled,
     6: migrate_6_group_chats,
     7: migrate_7_group_chat_full_schedule,
+    8: migrate_8_substitution_history,
 }
 
 

@@ -60,9 +60,32 @@ async def test_health_ok(client) -> None:
     for key in ("schema_version", "users_count", "last_schedule_update",
                 "lessons_cached", "checked_at"):
         assert key in payload, f"нет ключа {key}"
-    assert payload["schema_version"] == 7
+    assert payload["schema_version"] == 8
     assert payload["users_count"] == 1
     assert payload["lessons_cached"] > 1000
+
+
+async def test_health_reports_substitution_history(client, conn,
+                                                   parsed_schedule) -> None:
+    """Задача B: /health отдаёт статистику истории замен."""
+    payload = await (await client.get("/health")).json()
+    assert "substitution_history_rows" in payload
+    assert "substitution_history_earliest" in payload
+    # История пуста — значит 0 и None.
+    assert payload["substitution_history_rows"] == 0
+    assert payload["substitution_history_earliest"] is None
+
+    from bot import db
+
+    db.save_substitution_history(conn, GROUP, "2026-09-28", [{
+        "para": 2, "old_subject": "A", "new_subject": "B",
+        "teacher": "T", "room": "1", "is_cancelled": False,
+        "is_self_study": False,
+    }])
+
+    payload = await (await client.get("/health")).json()
+    assert payload["substitution_history_rows"] == 1
+    assert payload["substitution_history_earliest"] == "2026-09-28"
 
 
 async def test_health_content_type_json(client) -> None:

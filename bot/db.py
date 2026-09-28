@@ -475,6 +475,127 @@ def get_group_chats_for_group(conn: sqlite3.Connection,
     return [dict(row) for row in rows]
 
 
+# ==========================================================================
+# История замен за учебный год (шаг 3: заготовка под будущую фичу)
+# ==========================================================================
+
+
+def save_substitution_history(conn: sqlite3.Connection, group_name: str,
+                              date_iso: str, subs: list[dict],
+                              now: str | None = None) -> int:
+    """Записать замены группы в историю (в ДОПОЛНЕНИЕ к текущему листу).
+
+    Ключ записи — ``(group_name, date_iso, para)``: лист замен может
+    обновляться в течение дня (замены добавляют и правят), поэтому
+    повторная встреча той же пары **не создаёт дубль**, а обновляет
+    ``last_seen_at``. Поля при этом тоже обновляются: замена могла
+    измениться (другой предмет, кабинет, преподаватель).
+
+    ``first_seen_at`` пишется один раз — когда пара впервые появилась в листе.
+
+    Args:
+        conn: соединение SQLite.
+        group_name: нормализованное имя группы.
+        date_iso: дата замен (``YYYY-MM-DD``).
+        subs: словари замен парсера (``para``, ``old_subject``,
+            ``new_subject``, ``teacher``, ``room``, ``is_cancelled``,
+            ``is_self_study``).
+        now: момент в ISO (для тестов); иначе — пояс техникума.
+
+    Returns:
+        Количество обработанных записей.
+    """
+    if not subs:
+        return 0
+
+    from datetime import datetime
+
+    from bot.config import TIMEZONE
+
+    moment = now or datetime.now(TIMEZONE).isoformat(timespec="seconds")
+    with transaction(conn):
+        for sub in subs:
+            conn.execute(
+                "INSERT INTO substitution_history"
+                " (group_name, date_iso, para, old_subject, new_subject,"
+                "  teacher, room, is_cancelled, is_self_study,"
+                "  first_seen_at, last_seen_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                " ON CONFLICT(group_name, date_iso, para) DO UPDATE SET"
+                "   old_subject = excluded.old_subject,"
+                "   new_subject = excluded.new_subject,"
+                "   teacher = excluded.teacher,"
+                "   room = excluded.room,"
+                "   is_cancelled = excluded.is_cancelled,"
+                "   is_self_study = excluded.is_self_study,"
+                "   last_seen_at = excluded.last_seen_at",
+                (
+                    group_name, date_iso, int(sub.get("para") or 0),
+                    str(sub.get("old_subject") or ""),
+                    str(sub.get("new_subject") or ""),
+                    str(sub.get("teacher") or ""),
+                    str(sub.get("room") or ""),
+                    int(bool(sub.get("is_cancelled"))),
+                    int(bool(sub.get("is_self_study"))),
+                    moment, moment,
+                ),
+            )
+    return len(subs)
+
+
+def get_known_groups(conn: sqlite3.Connection) -> list[str]:
+    """Группы, у которых есть хотя бы один зарегистрированный пользователь.
+
+    История замен пишется только для них: иначе таблица наполнялась бы
+    заменами всех 76 групп техникума, а нужны они лишь там, где есть
+    кому их показывать.
+
+    Returns:
+        Отсортированный список уникальных непустых имён групп.
+    """
+    rows = conn.execute(
+        "SELECT DISTINCT group_name FROM users"
+        " WHERE group_name IS NOT NULL AND TRIM(group_name) != ''"
+        " ORDER BY group_name"
+    ).fetchall()
+    return [str(row["group_name"]) for row in rows]
+
+
+def cleanup_substitution_history(conn: sqlite3.Connection,
+                                 until_date_iso: str) -> int:
+    """Удалить историю замен раньше указанной даты (граница учебного года).
+
+    Args:
+        conn: соединение SQLite.
+        until_date_iso: удаляются записи со ``date_iso < until_date_iso``.
+
+    Returns:
+        Количество удалённых записей.
+    """
+    with transaction(conn):
+        cursor = conn.execute(
+            "DELETE FROM substitution_history WHERE date_iso < ?",
+            (until_date_iso,),
+        )
+    return cursor.rowcount
+
+
+def count_substitution_history(conn: sqlite3.Connection) -> int:
+    """Сколько записей накопилось в истории замен."""
+    return int(
+        conn.execute("SELECT COUNT(*) FROM substitution_history").fetchone()[0]
+    )
+
+
+def earliest_substitution_history_date(conn: sqlite3.Connection) -> str | None:
+    """Самая ранняя дата в истории замен или None, если история пуста."""
+    row = conn.execute(
+        "SELECT MIN(date_iso) AS earliest FROM substitution_history"
+    ).fetchone()
+    value = row["earliest"] if row is not None else None
+    return str(value) if value else None
+
+
 def get_all_notify_groups(conn: sqlite3.Connection) -> list[str]:
     """Группы, у которых есть получатели: личные подписчики ИЛИ чаты.
 

@@ -43,6 +43,7 @@ from bot.config import (
     TIMEZONE,
     USER_AGENT,
 )
+from bot import db
 from bot.db import transaction
 from bot.parsers.schedule import parse_docx
 from bot.parsers.substitutions import parse_html
@@ -293,6 +294,47 @@ def save_substitutions(conn, rows: list[dict]) -> int:
     return len(rows)
 
 
+def save_history_for_known_groups(conn, rows: list[dict]) -> dict[str, int]:
+    """Записать лист замен в историю — только для групп с пользователями.
+
+    Нормализация имён берётся из парсера (``row["group"]`` уже нормализован),
+    но группа из листа замен и группа пользователя могут отличаться
+    написанием, поэтому имена приводим к каноническому виду обе стороны.
+
+    Args:
+        conn: соединение SQLite.
+        rows: разобранный лист замен (``parse_html``).
+
+    Returns:
+        Словарь ``{группа: сколько замен записано}`` — только для известных
+        групп; пустой словарь, если писать нечего.
+    """
+    from bot.parsers.groups import normalize_group_name
+
+    known = {normalize_group_name(name) for name in db.get_known_groups(conn)}
+    if not known:
+        return {}
+
+    by_group: dict[str, list[dict]] = {}
+    for row in rows:
+        group = normalize_group_name(str(row.get("group") or ""))
+        if group in known:
+            by_group.setdefault(group, []).append(row)
+
+    saved: dict[str, int] = {}
+    for group, group_rows in by_group.items():
+        by_date: dict[str, list[dict]] = {}
+        for row in group_rows:
+            date_iso = str(row.get("date_iso") or "")
+            if date_iso:
+                by_date.setdefault(date_iso, []).append(row)
+        for date_iso, day_rows in by_date.items():
+            saved[group] = saved.get(group, 0) + db.save_substitution_history(
+                conn, group, date_iso, day_rows
+            )
+    return saved
+
+
 def _log_failure(conn, key: str, source: str, error: str) -> None:
     """WARNING с текстом ошибки и возрастом кэша (правило 2)."""
     age = cache_age_seconds(conn, key)
@@ -421,6 +463,20 @@ async def refresh_substitutions(conn,
             return -1
 
         count = save_substitutions(conn, rows)
+
+        # История замен (шаг 3): пишем В ДОПОЛНЕНИЕ к текущему листу и только
+        # для групп с зарегистрированными пользователями. Ошибка истории не
+        # должна ронять обновление кэша — лист замен важнее.
+        try:
+            saved_groups = save_history_for_known_groups(conn, rows)
+            if saved_groups:
+                logger.info("substitution history saved",
+                            extra={"groups": len(saved_groups),
+                                   "rows": sum(saved_groups.values())})
+        except Exception as exc:
+            logger.warning("substitution history not saved",
+                           extra={"error": repr(exc)})
+
         with transaction(conn):
             _set_meta(conn, META_LAST_SUBSTITUTIONS,
                       datetime.now(timezone.utc).isoformat())

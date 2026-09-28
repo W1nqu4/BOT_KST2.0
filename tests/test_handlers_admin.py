@@ -167,6 +167,32 @@ def test_build_stats_text_missing_db_file(conn) -> None:
     assert "нет файла" in body
 
 
+def test_build_stats_text_history_empty(conn) -> None:
+    """Пустая история замен — строка «📜 История замен: пусто»."""
+    body = adm.build_stats_text(conn, "data/test.db")
+    assert "📜 История замен: пусто" in body
+
+
+def test_build_stats_text_history_filled(conn) -> None:
+    """История есть — строка с количеством записей и датой начала."""
+    from bot import db
+
+    db.save_substitution_history(conn, GROUP, "2026-09-28", [{
+        "para": 2, "old_subject": "A", "new_subject": "B",
+        "teacher": "T", "room": "1", "is_cancelled": False,
+        "is_self_study": False,
+    }])
+    db.save_substitution_history(conn, GROUP, "2026-09-29", [{
+        "para": 3, "old_subject": "A", "new_subject": "C",
+        "teacher": "T", "room": "2", "is_cancelled": False,
+        "is_self_study": False,
+    }])
+
+    body = adm.build_stats_text(conn, "data/test.db")
+
+    assert "📜 История замен: <b>2</b> записей, с 2026-09-28" in body
+
+
 def test_count_active_users_since(conn) -> None:
     """Учёт глубины: пользователь 8 дней назад в недельное окно не попадает."""
     from datetime import datetime as _dt
