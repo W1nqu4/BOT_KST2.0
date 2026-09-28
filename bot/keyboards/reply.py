@@ -22,16 +22,22 @@ IN_DEVELOPMENT = "🚧 Раздел в разработке"
 
 
 def main_kb() -> ReplyKeyboardMarkup:
-    """Главное меню: по две кнопки в ряд, клавиатура подстраивается.
+    """Главное меню: ровно три кнопки.
+
+    Layout:
+        [📆 Расписание] [📝 Дедлайны]
+        [👤 Профиль]
+
+    «📅 Сегодня» убрана (её роль выполняет «📆 Расписание» — открывает
+    сегодняшний день), «📚 Предметы» живут внутри экрана расписания.
 
     Returns:
-        ReplyKeyboardMarkup с 5 кнопками.
+        ReplyKeyboardMarkup с тремя кнопками.
     """
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text=BTN_TODAY), KeyboardButton(text=BTN_SCHEDULE)],
-            [KeyboardButton(text=BTN_DEADLINES), KeyboardButton(text=BTN_PROFILE)],
-            [KeyboardButton(text=BTN_FEEDBACK)],
+            [KeyboardButton(text=BTN_SCHEDULE), KeyboardButton(text=BTN_DEADLINES)],
+            [KeyboardButton(text=BTN_PROFILE)],
         ],
         resize_keyboard=True,
         input_field_placeholder="Выбери раздел или напиши группу",

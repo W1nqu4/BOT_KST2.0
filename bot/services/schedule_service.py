@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import date
+from datetime import date, timedelta
 
 from bot.config import (
     BELL_TIMES,
@@ -27,6 +27,10 @@ logger = logging.getLogger(__name__)
 WEEK_TYPE_EVEN = "Чет"
 WEEK_TYPE_ODD = "нечет"
 WEEK_TYPE_ALWAYS = ""
+
+# «📚 Предметы»: сколько пар показывать и на какой горизонт искать.
+SUBJECT_LESSONS_LIMIT = 10
+SUBJECT_HORIZON_DAYS = 60
 
 
 def week_type_for_date(d: date) -> str:
@@ -196,6 +200,80 @@ def apply_substitutions(conn, lessons: list[dict], group: str,
 
     result.sort(key=lambda item: item["para_number"])
     return result
+
+
+def get_subjects_for_group(conn, group: str) -> list[str]:
+    """Уникальные предметы группы из кэша расписания.
+
+    Args:
+        conn: соединение SQLite.
+        group: имя группы («26КАД»).
+
+    Returns:
+        Отсортированный список непустых названий предметов; пустой список,
+        если расписание ещё не загружено.
+    """
+    rows = conn.execute(
+        "SELECT DISTINCT subject FROM schedule_cache"
+        " WHERE group_name = ? AND subject <> ''"
+        " ORDER BY subject",
+        (group,),
+    ).fetchall()
+    return [str(row["subject"]) for row in rows]
+
+
+def get_nearest_lessons_for_subject(conn, group: str, subject: str,
+                                    limit: int = SUBJECT_LESSONS_LIMIT,
+                                    horizon_days: int = SUBJECT_HORIZON_DAYS,
+                                    start: date | None = None) -> list[dict]:
+    """Ближайшие пары группы по предмету, начиная с ``start`` (горизонт 60 дней).
+
+    Каждый день прогоняется через :func:`get_lessons_for_day` (учёт чётности)
+    и :func:`apply_substitutions` (учёт замен); берутся только пары с нужным
+    предметом. Отменённые пары пропускаются — показывать их как занятие было
+    бы неверно.
+
+    Args:
+        conn: соединение SQLite.
+        group: имя группы.
+        subject: точное название предмета из :func:`get_subjects_for_group`.
+        limit: сколько пар вернуть максимум (по умолчанию 10).
+        horizon_days: горизонт поиска в днях (включительно).
+        start: дата начала; по умолчанию — сегодня.
+
+    Returns:
+        Список словарей ``{date, para_number, subject, teacher, room,
+        time_range, week_type}``, отсортированный по дате, затем по номеру
+        пары. Пустой список, если пар нет.
+    """
+    day = start or date.today()
+    found: list[dict] = []
+    for offset in range(horizon_days + 1):
+        current = day + timedelta(days=offset)
+        lessons = apply_substitutions(
+            conn, get_lessons_for_day(conn, group, current), group, current
+        )
+        for lesson in lessons:
+            if lesson.get("is_cancelled"):
+                continue
+            if lesson["subject"] != subject:
+                continue
+            found.append({
+                "date": current,
+                "para_number": lesson["para_number"],
+                "subject": lesson["subject"],
+                "teacher": lesson["teacher"],
+                "room": lesson["room"],
+                "time_range": lesson["time_range"],
+                "week_type": lesson["week_type"],
+            })
+            if len(found) >= limit:
+                found.sort(key=lambda item: (item["date"], item["para_number"]))
+                return found
+    found.sort(key=lambda item: (item["date"], item["para_number"]))
+    return found
+
+
 async def _sleep(seconds: float) -> None:
     """Пауза между проходами цикла.
 

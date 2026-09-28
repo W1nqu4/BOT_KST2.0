@@ -33,7 +33,8 @@ router = Router(name="help")
 HELP_TEXT = (
     "🤖 <b>Что умеет бот</b>\n"
     "• Показывает расписание с учётом чёт/нечет по числу месяца\n"
-    "• Показывает замены на выбранный день\n"
+    "• Листает дни ◀️ ▶️ и показывает замены\n"
+    "• Ищет ближайшие пары по предмету («📚 Предметы» внутри расписания)\n"
     "• Ведёт твои дедлайны с напоминаниями\n"
     "• Даёт подписку на .ics-календарь (Google / Apple)\n\n"
     "<b>Команды</b>\n"
@@ -41,9 +42,9 @@ HELP_TEXT = (
     "/help — эта справка\n"
     "/settings — настройки уведомлений\n\n"
     "<b>Меню</b>\n"
-    "📅 Сегодня · 📆 Расписание · 📝 Дедлайны · 👤 Профиль\n\n"
-    f"Что-то сломалось? Нажми «{reply_kb.BTN_FEEDBACK}» — "
-    "сообщение уйдёт администратору вместе с контекстом."
+    "📆 Расписание · 📝 Дедлайны · 👤 Профиль\n\n"
+    f"Что-то сломалось? Кнопка «{reply_kb.BTN_FEEDBACK}» — "
+    "в профиле; сообщение уйдёт администратору вместе с контекстом."
 )
 
 SETTINGS_TEXT = (
@@ -138,8 +139,21 @@ async def btn_profile(message: Message, conn, settings, state: FSMContext) -> No
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=BTN_CALENDAR,
                               callback_data="profile:calendar")],
+        [InlineKeyboardButton(text=reply_kb.BTN_FEEDBACK,
+                              callback_data="profile:feedback")],
     ])
     await message.answer(text, parse_mode="HTML", reply_markup=kb)
+
+
+@router.callback_query(F.data == "profile:feedback")
+async def cb_profile_feedback(callback: CallbackQuery, state: FSMContext) -> None:
+    """Запустить обратную связь из профиля (в главном меню кнопки нет)."""
+    from bot.handlers.feedback import PROMPT_TEXT, Feedback
+
+    await state.set_state(Feedback.waiting_text)
+    if callback.message is not None:
+        await callback.message.answer(PROMPT_TEXT, parse_mode="HTML")
+    await callback.answer()
 
 
 @router.callback_query(F.data == "profile:calendar")

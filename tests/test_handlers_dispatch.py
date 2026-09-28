@@ -209,7 +209,7 @@ async def test_start_twice_returns_to_dashboard(dp, conn_with_groups) -> None:
     assert any("С возвращением" in t for t in texts)
     assert not any("Введи номер группы" in t for t in texts)
 async def test_today_button_shows_schedule_with_parity(dp, conn_with_groups) -> None:
-    """Кнопка «📅 Сегодня»: шапка «Число: DD → Чет/нечет» и карточки пар."""
+    """Кнопка «📅 Сегодня» (алиас): шапка «Число: DD → Чет/нечет» и карточки."""
     bot = FakeBot()
     await _register(dp, bot)
     await dp.feed_update(bot, _update(rk.BTN_TODAY))
@@ -223,7 +223,7 @@ async def test_today_button_shows_schedule_with_parity(dp, conn_with_groups) -> 
     assert ("<b>Чет</b>" in body) or ("<b>нечет</b>" in body)
     markup = next(m["reply_markup"] for m in bot.sent if m["reply_markup"])
     data = [b.callback_data for row in markup.inline_keyboard for b in row]
-    assert "sched:today" in data
+    assert "sched:nav:+1" in data and "subj:list" in data
 
 
 async def test_schedule_button_shows_navigation(dp, conn_with_groups) -> None:
@@ -286,6 +286,172 @@ async def test_callback_weekday_selects_day(dp, conn_with_groups) -> None:
     today = date.today()
     expected = today + timedelta(days=5 - today.isoweekday())
     assert expected.strftime("%d.%m.%Y") in _texts(bot)[0]
+async def test_nav_forward_twice_moves_two_days(dp, conn_with_groups) -> None:
+    """Регресс к багу Вт/Ср: ▶️ дважды показывает РАЗНЫЕ дни.
+
+    Раньше смещение считалось от ``date.today()``, поэтому каждое нажатие
+    возвращало «завтра», и листать дни было невозможно.
+    """
+    bot = FakeBot()
+    await _register(dp, bot)
+
+    await dp.feed_update(bot, _callback("sched:nav:+1"))
+    first = _texts(bot)[0]
+    bot.sent.clear()
+    await dp.feed_update(bot, _callback("sched:nav:+1"))
+    second = _texts(bot)[0]
+
+    today = date.today()
+    assert (today + timedelta(days=1)).strftime("%d.%m.%Y") in first
+    assert (today + timedelta(days=2)).strftime("%d.%m.%Y") in second
+
+
+async def test_nav_back_returns_to_previous_day(dp, conn_with_groups) -> None:
+    """▶️ затем ◀️ возвращает на исходный день (а не уводит в воскресенье)."""
+    bot = FakeBot()
+    await _register(dp, bot)
+
+    await dp.feed_update(bot, _callback("sched:nav:+1"))
+    bot.sent.clear()
+    await dp.feed_update(bot, _callback("sched:nav:-1"))
+
+    today = date.today()
+    assert today.strftime("%d.%m.%Y") in _texts(bot)[0]
+
+
+async def test_nav_back_before_first_step_goes_yesterday(dp, conn_with_groups) -> None:
+    """◀️ от сегодняшнего дня уходит на вчера, а не в прошлое воскресенье."""
+    bot = FakeBot()
+    await _register(dp, bot)
+    await dp.feed_update(bot, _update(rk.BTN_SCHEDULE))
+    bot.sent.clear()
+
+    await dp.feed_update(bot, _callback("sched:nav:-1"))
+
+    yesterday = date.today() - timedelta(days=1)
+    assert yesterday.strftime("%d.%m.%Y") in _texts(bot)[0]
+
+
+async def test_nav_shows_lessons_on_tuesday_and_wednesday(dp,
+                                                          conn_with_groups) -> None:
+    """Задача 1: Вт и Ср отдают непустые списки пар у 26КАД."""
+    bot = FakeBot()
+    await _register(dp, bot)
+
+    for weekday, label in ((2, "Вторник"), (3, "Среда")):
+        bot.sent.clear()
+        await dp.feed_update(bot, _callback(f"sched:nav:{weekday}"))
+        body = _texts(bot)[0]
+        assert label in body
+        assert "пара</b>" in body
+        assert "🚪" in body
+
+
+async def test_day_screen_has_subjects_button(dp, conn_with_groups) -> None:
+    """На экране дня есть «📚 Предметы»."""
+    bot = FakeBot()
+    await _register(dp, bot)
+    await dp.feed_update(bot, _update(rk.BTN_SCHEDULE))
+
+    markup = next(m["reply_markup"] for m in bot.sent if m["reply_markup"])
+    data = [b.callback_data for row in markup.inline_keyboard for b in row]
+    assert "subj:list" in data
+
+
+# --- «📚 Предметы» ---
+
+async def test_subjects_list_shows_group_subjects(dp, conn_with_groups) -> None:
+    """«📚 Предметы» присылает список предметов группы кнопками."""
+    bot = FakeBot()
+    await _register(dp, bot)
+    await dp.feed_update(bot, _callback("subj:list"))
+
+    assert any("Выбери предмет" in t for t in _texts(bot))
+    markup = next(m["reply_markup"] for m in bot.sent if m["reply_markup"])
+    buttons = [b for row in markup.inline_keyboard for b in row]
+    labels = [b.text for b in buttons]
+    assert "ОД.07 Математика" in labels
+    assert buttons[-1].callback_data == "subj:back"
+
+
+async def test_subject_show_lists_nearest_lessons(dp, conn_with_groups) -> None:
+    """Детали предмета: 10 ближайших пар с датами, преподавателем и кабинетом."""
+    bot = FakeBot()
+    await _register(dp, bot)
+    await dp.feed_update(bot, _callback("subj:list"))
+    bot.sent.clear()
+
+    await dp.feed_update(bot, _callback("subj:show:6"))
+
+    body = _texts(bot)[0]
+    assert "📚 <b>ОД.07 Математика</b>" in body
+    assert "👤 Кудрявцева Полина Алексеевна" in body
+    assert "🚪 307А" in body
+    assert body.count("📅 ") == 10
+    # Первая пара по математике у 26КАД — нечётный вторник накануне/в текущий
+    # вторник недели; проверяем формат даты и день недели в скобках.
+    assert "(" in body and ")" in body
+
+
+async def test_subject_show_rejects_stale_index(dp, conn_with_groups) -> None:
+    """Устаревший индекс не падает: отвечаем просьбой выбрать заново."""
+    bot = FakeBot()
+    await _register(dp, bot)
+    await dp.feed_update(bot, _callback("subj:show:999"))
+
+    assert not any("📚 <b>" in t for t in _texts(bot))
+
+
+async def test_subject_detail_buttons(dp, conn_with_groups) -> None:
+    """Под деталями предмета: «🔙 К предметам» и «🏠 Меню»."""
+    bot = FakeBot()
+    await _register(dp, bot)
+    await dp.feed_update(bot, _callback("subj:show:0"))
+
+    markup = next(m["reply_markup"] for m in bot.sent if m["reply_markup"])
+    data = [b.callback_data for row in markup.inline_keyboard for b in row]
+    assert data == ["subj:list", "menu:home"]
+
+
+async def test_subject_back_returns_to_day(dp, conn_with_groups) -> None:
+    """«🔙 Назад» возвращает к расписанию дня."""
+    bot = FakeBot()
+    await _register(dp, bot)
+    await dp.feed_update(bot, _callback("subj:list"))
+    bot.sent.clear()
+
+    await dp.feed_update(bot, _callback("subj:back"))
+
+    assert "Группа: <b>26КАД</b>" in _texts(bot)[0]
+
+
+async def test_subject_back_keeps_selected_day(dp, conn_with_groups) -> None:
+    """Возврат из предметов сохраняет выбранный день, а не сбрасывает на сегодня."""
+    bot = FakeBot()
+    await _register(dp, bot)
+    await dp.feed_update(bot, _callback("sched:nav:4"))
+    await dp.feed_update(bot, _callback("subj:list"))
+    bot.sent.clear()
+
+    await dp.feed_update(bot, _callback("subj:back"))
+
+    today = date.today()
+    thursday = today + timedelta(days=4 - today.isoweekday())
+    assert thursday.strftime("%d.%m.%Y") in _texts(bot)[0]
+
+
+async def test_menu_button_restores_main_keyboard(dp, conn_with_groups) -> None:
+    """«🏠 Меню» возвращает главную reply-клавиатуру из трёх кнопок."""
+    bot = FakeBot()
+    await _register(dp, bot)
+    await dp.feed_update(bot, _callback("menu:home"))
+
+    markup = next(m["reply_markup"] for m in bot.sent
+                  if m["reply_markup"] is not None
+                  and getattr(m["reply_markup"], "keyboard", None))
+    assert [b.text for b in markup.keyboard[0]] == [
+        rk.BTN_SCHEDULE, rk.BTN_DEADLINES,
+    ]
 
 
 async def test_schedule_without_group_asks_to_register(dp, conn) -> None:

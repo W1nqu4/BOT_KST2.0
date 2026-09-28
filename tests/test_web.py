@@ -70,6 +70,33 @@ async def test_health_content_type_json(client) -> None:
     assert "json" in response.headers["Content-Type"]
 
 
+async def test_health_reports_public_base_url(conn, parsed_schedule) -> None:
+    """Задача 2: /health отдаёт public_base_url из настроек (для диагностики).
+
+    Локально ``settings`` может отсутствовать — тогда поле есть, но пустое,
+    поэтому проверяются оба случая.
+    """
+    cache_service.save_schedule(conn, parsed_schedule)
+
+    class _Settings:
+        public_base_url = "https://kst24-kst24.up.railway.app"
+
+    server = TestServer(create_app(conn, _Settings()))
+    test_client = TestClient(server)
+    await test_client.start_server()
+    try:
+        payload = await (await test_client.get("/health")).json()
+        assert payload["public_base_url"] == "https://kst24-kst24.up.railway.app"
+    finally:
+        await test_client.close()
+
+
+async def test_health_public_base_url_empty_without_settings(client) -> None:
+    """Без настроек поле присутствует и пустое (не падает)."""
+    payload = await (await client.get("/health")).json()
+    assert payload["public_base_url"] == ""
+
+
 # --- /calendar/{token}.ics ---
 
 async def test_calendar_ok(client, conn) -> None:

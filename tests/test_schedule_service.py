@@ -6,7 +6,7 @@
 """
 
 import asyncio
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 import pytest
@@ -172,6 +172,27 @@ def test_empty_cache_returns_empty(conn) -> None:
     assert ss.get_lessons_for_day(conn, GROUP, SECOND_TUESDAY_EVEN) == []
 
 
+def test_workdays_have_lessons_tuesday_and_wednesday(db_with_schedule) -> None:
+    """Задача 1: Вт 29.09.2026 и Ср 30.09.2026 у 26КАД дают непустые списки."""
+    tuesday = ss.get_lessons_for_day(db_with_schedule, GROUP, date(2026, 9, 29))
+    wednesday = ss.get_lessons_for_day(db_with_schedule, GROUP, date(2026, 9, 30))
+
+    assert len(tuesday) == 3
+    assert len(wednesday) == 3
+    assert {l["para_number"] for l in tuesday} == {1, 2, 3}
+    assert {l["para_number"] for l in wednesday} == {1, 2, 3}
+    assert ss.week_type_for_date(date(2026, 9, 29)) == "нечет"
+    assert ss.week_type_for_date(date(2026, 9, 30)) == "Чет"
+
+
+def test_monday_to_saturday_all_have_lessons(db_with_schedule) -> None:
+    """Пн–Сб (28.09–03.10) у 26КАД непустые — листание не упирается в пусто."""
+    for offset in range(6):
+        d = date(2026, 9, 28) + timedelta(days=offset)
+        lessons = ss.get_lessons_for_day(db_with_schedule, GROUP, d)
+        assert lessons, f"{d.isoformat()} ({d.isoweekday()}) пуст"
+
+
 def test_saturday_sunday_have_no_lessons_for_group(db_with_schedule) -> None:
     """Воскресенье (day 7) у 26КАД занятий нет."""
     sunday = date(2026, 9, 27)
@@ -324,6 +345,139 @@ def test_apply_sorted_by_para(db_with_schedule) -> None:
     )
     paras = [l["para_number"] for l in result]
     assert paras == sorted(paras)
+
+
+# --- get_subjects_for_group / get_nearest_lessons_for_subject ---
+
+def test_subjects_are_unique_and_sorted(db_with_schedule) -> None:
+    """Предметы группы: без дублей, по алфавиту, без пустых строк."""
+    subjects = ss.get_subjects_for_group(db_with_schedule, GROUP)
+    assert subjects == sorted(subjects)
+    assert len(subjects) == len(set(subjects))
+    assert all(s.strip() for s in subjects)
+    assert "ОД.07 Математика" in subjects
+
+
+def test_subjects_unknown_group_is_empty(db_with_schedule) -> None:
+    assert ss.get_subjects_for_group(db_with_schedule, "99XXX") == []
+
+
+def test_nearest_lessons_sorted_by_date_then_para(db_with_schedule) -> None:
+    """10 ближайших пар предмета отсортированы по дате, затем по номеру пары."""
+    lessons = ss.get_nearest_lessons_for_subject(
+        db_with_schedule, GROUP, "ОД.07 Математика",
+        start=date(2026, 9, 28),
+    )
+    assert len(lessons) == 10
+    keys = [(l["date"], l["para_number"]) for l in lessons]
+    assert keys == sorted(keys)
+    assert all(l["subject"] == "ОД.07 Математика" for l in lessons)
+    assert all(l["date"] >= date(2026, 9, 28) for l in lessons)
+
+
+def test_nearest_lessons_respect_limit(db_with_schedule) -> None:
+    """Лимит соблюдается: просим 3 — получаем 3."""
+    lessons = ss.get_nearest_lessons_for_subject(
+        db_with_schedule, GROUP, "ОД.07 Математика",
+        limit=3, start=date(2026, 9, 28),
+    )
+    assert len(lessons) == 3
+
+
+def test_nearest_lessons_respect_horizon(db_with_schedule) -> None:
+    """Горизонт соблюдается: все пары внутри окна ``horizon_days``."""
+    start = date(2026, 9, 28)
+    lessons = ss.get_nearest_lessons_for_subject(
+        db_with_schedule, GROUP, "ОД.07 Математика",
+        limit=50, horizon_days=7, start=start,
+    )
+    assert lessons
+    assert all((l["date"] - start).days <= 7 for l in lessons)
+
+
+def test_nearest_lessons_follow_parity(db_with_schedule) -> None:
+    """Чётность учитывается: в нечётный день пары с week_type 'нечет' есть,
+    а пары, привязанные только к чётному дню, не появляются.
+
+    «ОД.07 Математика» идёт у 26КАД и в чёт, и в нечет (проверено на
+    расписании); проверяем, что чётность дня в результате совпадает с
+    фактической для этой даты.
+    """
+    for iso, expected in (("2026-09-29", "нечет"), ("2026-09-30", "Чет")):
+        d = date.fromisoformat(iso)
+        lessons = ss.get_nearest_lessons_for_subject(
+            db_with_schedule, GROUP, "ОД.07 Математика",
+            limit=5, horizon_days=0, start=d,
+        )
+        assert lessons, f"{iso} должен содержать пары по математике"
+        assert all(ss.week_type_for_date(l["date"]) == expected
+                   for l in lessons)
+
+
+def test_nearest_lessons_unknown_subject_is_empty(db_with_schedule) -> None:
+    """Несуществующий предмет → пустой список (в UI будет «пар не найдено»)."""
+    lessons = ss.get_nearest_lessons_for_subject(
+        db_with_schedule, GROUP, "Нет такого предмета",
+        start=date(2026, 9, 28),
+    )
+    assert lessons == []
+
+
+def test_nearest_lessons_apply_substitutions(db_with_schedule) -> None:
+    """Замены учитываются: подменённый предмет попадает в свою выдачу.
+
+    Ставим замену «математика → химия» на пару 3 вторника 29.09 и проверяем,
+    что в выдаче по химии этот день появился.
+    """
+    cache_service.save_substitutions(db_with_schedule, [{
+        "group": GROUP, "date_iso": "2026-09-29", "para": 3,
+        "old_subject": "ОД.07 Математика", "new_subject": "ОД.12 Химия",
+        "teacher": "Витюгова Наталья Владимировна", "room": "313А",
+        "is_cancelled": False, "is_self_study": False,
+    }])
+
+    chemistry = ss.get_nearest_lessons_for_subject(
+        db_with_schedule, GROUP, "ОД.12 Химия",
+        limit=10, horizon_days=0, start=date(2026, 9, 29),
+    )
+    assert any(l["date"] == date(2026, 9, 29) and l["para_number"] == 3
+               for l in chemistry)
+
+    math = ss.get_nearest_lessons_for_subject(
+        db_with_schedule, GROUP, "ОД.07 Математика",
+        limit=10, horizon_days=0, start=date(2026, 9, 29),
+    )
+    assert not any(l["para_number"] == 3 for l in math)
+
+
+def test_nearest_lessons_skip_cancelled(db_with_schedule) -> None:
+    """Отменённая пара не показывается как занятие по предмету."""
+    cache_service.save_substitutions(db_with_schedule, [{
+        "group": GROUP, "date_iso": "2026-09-29", "para": 3,
+        "old_subject": "ОД.07 Математика", "new_subject": "",
+        "teacher": "", "room": "", "is_cancelled": True,
+        "is_self_study": False,
+    }])
+
+    lessons = ss.get_nearest_lessons_for_subject(
+        db_with_schedule, GROUP, "ОД.07 Математика",
+        limit=10, horizon_days=0, start=date(2026, 9, 29),
+    )
+    assert not any(l["para_number"] == 3 for l in lessons)
+
+
+def test_nearest_lessons_have_display_fields(db_with_schedule) -> None:
+    """В выдаче есть всё для карточки: дата, номер пары, время, кабинет."""
+    lessons = ss.get_nearest_lessons_for_subject(
+        db_with_schedule, GROUP, "ОД.07 Математика",
+        limit=1, start=date(2026, 9, 28),
+    )
+    lesson = lessons[0]
+    for field in ("date", "para_number", "subject", "teacher", "room",
+                  "time_range", "week_type"):
+        assert field in lesson, f"нет поля {field}"
+    assert isinstance(lesson["date"], date)
+    assert lesson["time_range"]
 # --- refresh-циклы ---
 
 async def test_schedule_loop_survives_errors(conn, monkeypatch) -> None:

@@ -15,6 +15,12 @@ CB_NAV_PREFIX = "sched:nav:"      # sched:nav:0 .. sched:nav:5
 CB_TODAY = "sched:today"
 CB_PICK_DAY = "sched:pickday"
 CB_CHANGE_GROUP = "menu:changegroup"
+CB_MENU = "menu:home"             # 🏠 Меню: вернуть reply-клавиатуру
+
+# Callback-данные раздела «📚 Предметы» (внутри экрана расписания).
+CB_SUBJECTS = "subj:list"
+CB_SUBJECT_PREFIX = "subj:show:"
+CB_SUBJECT_BACK = "subj:back"
 
 # Тексты дней недели (1..7, понедельник = 1).
 DAY_NAMES = {
@@ -28,26 +34,39 @@ def day_name(weekday: int) -> str:
     return DAY_NAMES.get(weekday, "")
 
 
+def day_short(weekday: int) -> str:
+    """Короткое название дня недели (``Пн``..``Вс``) по ISO-номеру."""
+    if 1 <= weekday <= len(WEEKDAY_HEADERS):
+        return WEEKDAY_HEADERS[weekday - 1]
+    return ""
+
+
 def week_nav_kb(current: date, direction: int) -> InlineKeyboardMarkup:
-    """Навигация по дням недели: [◀️] [🔄 Сегодня] [▶️] и выбор дня.
+    """Навигация по экрану дня: листание, предметы, выбор дня, меню.
+
+    Layout:
+        [◀️] [▶️]
+        [📚 Предметы]
+        [📆 Выбрать день]
+        [🏠 Меню]
 
     Args:
-        current: дата, которая показана сейчас (для смещения).
-        direction: не используется в данных кнопок (смещение считается
-            в обработчике от текущей даты), оставлен для читаемости вызова.
+        current: дата, которая показана сейчас (для читаемости вызова;
+            сама навигация считается обработчиком от текущего экрана).
+        direction: не используется в данных кнопок, оставлен для
+            совместимости с прежним вызовом.
 
     Returns:
-        InlineKeyboardMarkup с навигацией.
+        InlineKeyboardMarkup с навигацией по дню.
     """
     return InlineKeyboardMarkup(inline_keyboard=[
         [
             InlineKeyboardButton(text="◀️", callback_data=f"{CB_NAV_PREFIX}-1"),
-            InlineKeyboardButton(text="🔄 Сегодня", callback_data=CB_TODAY),
             InlineKeyboardButton(text="▶️", callback_data=f"{CB_NAV_PREFIX}+1"),
         ],
-        [
-            InlineKeyboardButton(text="📆 Выбрать день", callback_data=CB_PICK_DAY),
-        ],
+        [InlineKeyboardButton(text="📚 Предметы", callback_data=CB_SUBJECTS)],
+        [InlineKeyboardButton(text="📆 Выбрать день", callback_data=CB_PICK_DAY)],
+        [InlineKeyboardButton(text="🏠 Меню", callback_data=CB_MENU)],
     ])
 
 
@@ -55,7 +74,7 @@ def pick_day_kb(today: date) -> InlineKeyboardMarkup:
     """Выбор дня недели: по кнопке на каждый день (Пн..Сб).
 
     Returns:
-        InlineKeyboardMarkup с шестью днями в двух рядах.
+        InlineKeyboardMarkup с шестью днями в двух рядах и возвратом к меню.
     """
     buttons = [
         InlineKeyboardButton(text=day_name(i), callback_data=f"{CB_NAV_PREFIX}{i}")
@@ -64,7 +83,42 @@ def pick_day_kb(today: date) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         buttons[:3],
         buttons[3:],
-        [InlineKeyboardButton(text="🔄 Сегодня", callback_data=CB_TODAY)],
+        [InlineKeyboardButton(text="🏠 Меню", callback_data=CB_MENU)],
+    ])
+
+
+def subjects_kb(subjects: list[str]) -> InlineKeyboardMarkup:
+    """Список предметов группы: кнопка на предмет + возврат к расписанию.
+
+    Args:
+        subjects: названия предметов (индекс попадает в callback).
+
+    Returns:
+        InlineKeyboardMarkup: ряды предметов, затем [🔙 Назад].
+    """
+    rows = [
+        [InlineKeyboardButton(text=name[:60],
+                              callback_data=f"{CB_SUBJECT_PREFIX}{index}")]
+        for index, name in enumerate(subjects)
+    ]
+    rows.append([InlineKeyboardButton(text="🔙 Назад",
+                                      callback_data=CB_SUBJECT_BACK)])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def subject_detail_kb() -> InlineKeyboardMarkup:
+    """Кнопки под списком ближайших пар предмета."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔙 К предметам", callback_data=CB_SUBJECTS)],
+        [InlineKeyboardButton(text="🏠 Меню", callback_data=CB_MENU)],
+    ])
+
+
+def empty_subjects_kb() -> InlineKeyboardMarkup:
+    """Кнопки, когда предметов у группы нет."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔙 Назад", callback_data=CB_SUBJECT_BACK)],
+        [InlineKeyboardButton(text="🏠 Меню", callback_data=CB_MENU)],
     ])
 
 

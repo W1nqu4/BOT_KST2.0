@@ -39,11 +39,21 @@ def conn_with_groups(conn, parsed_schedule):
 # --- reply-клавиатура ---
 
 def test_main_kb_layout() -> None:
-    """Главное меню: две кнопки в ряд, resize_keyboard=True."""
+    """Главное меню: ровно три кнопки, две в первом ряду, resize_keyboard."""
     kb = rk.main_kb()
     assert kb.resize_keyboard is True
-    assert [b.text for b in kb.keyboard[0]] == [rk.BTN_TODAY, rk.BTN_SCHEDULE]
-    assert [b.text for b in kb.keyboard[1]] == [rk.BTN_DEADLINES, rk.BTN_PROFILE]
+    assert [[b.text for b in row] for row in kb.keyboard] == [
+        [rk.BTN_SCHEDULE, rk.BTN_DEADLINES],
+        [rk.BTN_PROFILE],
+    ]
+
+
+def test_main_kb_has_no_today_and_no_subjects() -> None:
+    """«📅 Сегодня» и «📚 Предметы» с главной клавиатуры убраны."""
+    labels = [b.text for row in rk.main_kb().keyboard for b in row]
+    assert rk.BTN_TODAY not in labels
+    assert "📚 Предметы" not in labels
+    assert len(labels) == 3
 
 
 def test_stub_buttons_have_text() -> None:
@@ -54,24 +64,63 @@ def test_stub_buttons_have_text() -> None:
 # --- inline-клавиатуры ---
 
 def test_week_nav_kb_callbacks() -> None:
-    """Навигация: ◀️/Сегодня/▶️ и «Выбрать день»."""
+    """Экран дня: ◀️/▶️, «📚 Предметы», «Выбрать день», «🏠 Меню»."""
     kb = ik.week_nav_kb(date(2026, 9, 22), 0)
     flat = [b for row in kb.inline_keyboard for b in row]
     data = [b.callback_data for b in flat]
-    assert "sched:nav:-1" in data
-    assert "sched:today" in data
-    assert "sched:nav:+1" in data
-    assert ik.CB_PICK_DAY in data
+    assert data == [
+        "sched:nav:-1", "sched:nav:+1",
+        ik.CB_SUBJECTS, ik.CB_PICK_DAY, ik.CB_MENU,
+    ]
+
+
+def test_week_nav_kb_layout() -> None:
+    """Layout дня: [◀️][▶️] / [📚 Предметы] / [📆 Выбрать день] / [🏠 Меню]."""
+    kb = ik.week_nav_kb(date(2026, 9, 22), 0)
+    assert [[b.text for b in row] for row in kb.inline_keyboard] == [
+        ["◀️", "▶️"],
+        ["📚 Предметы"],
+        ["📆 Выбрать день"],
+        ["🏠 Меню"],
+    ]
+
+
+def test_week_nav_kb_has_no_today_button() -> None:
+    """«🔄 Сегодня» на экране дня больше нет."""
+    kb = ik.week_nav_kb(date(2026, 9, 22), 0)
+    labels = [b.text for row in kb.inline_keyboard for b in row]
+    assert "🔄 Сегодня" not in labels
 
 
 def test_pick_day_kb_has_six_days() -> None:
-    """Выбор дня: шесть учебных дней и кнопка «Сегодня»."""
+    """Выбор дня: шесть учебных дней и возврат в меню."""
     kb = ik.pick_day_kb(date(2026, 9, 22))
     labels = [b.text for row in kb.inline_keyboard for b in row]
     for name in ("Понедельник", "Вторник", "Среда", "Четверг",
                  "Пятница", "Суббота"):
         assert name in labels
-    assert "🔄 Сегодня" in labels
+    assert "🏠 Меню" in labels
+
+
+def test_subjects_kb_builds_indexes() -> None:
+    """Список предметов: индекс предмета в callback + «🔙 Назад»."""
+    kb = ik.subjects_kb(["ОД.01 Русский язык", "ОД.07 Математика"])
+    data = [b.callback_data for row in kb.inline_keyboard for b in row]
+    assert data == ["subj:show:0", "subj:show:1", "subj:back"]
+
+
+def test_subject_detail_kb_buttons() -> None:
+    """Под деталями предмета: «К предметам» и «Меню»."""
+    kb = ik.subject_detail_kb()
+    data = [b.callback_data for row in kb.inline_keyboard for b in row]
+    assert data == [ik.CB_SUBJECTS, ik.CB_MENU]
+
+
+def test_day_short() -> None:
+    """Короткие названия дней для строки деталей предмета."""
+    assert ik.day_short(1) == "Пн"
+    assert ik.day_short(6) == "Сб"
+    assert ik.day_short(99) == ""
 
 
 def test_day_name() -> None:

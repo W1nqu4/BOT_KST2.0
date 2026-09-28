@@ -66,6 +66,9 @@ async def handle_health(request: web.Request) -> web.Response:
             {"status": "error", "db": "error", "error": repr(exc)}, status=503
         )
 
+    settings = request.app[SETTINGS_KEY]
+    public_base_url = getattr(settings, "public_base_url", "") if settings else ""
+
     return _json_response({
         "status": "ok",
         "db": "ok",
@@ -74,6 +77,7 @@ async def handle_health(request: web.Request) -> web.Response:
         "last_schedule_update": last_update,
         "last_substitutions_update": last_subs,
         "lessons_cached": int(lessons),
+        "public_base_url": public_base_url,
         "checked_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     })
 
