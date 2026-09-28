@@ -25,7 +25,7 @@ from aiogram import BaseMiddleware, Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.types import BotCommand, TelegramObject
+from aiogram.types import BotCommand, MenuButtonDefault, TelegramObject
 from aiohttp import web
 
 from bot.config import ConfigError, Settings
@@ -57,6 +57,35 @@ BOT_COMMANDS: tuple[BotCommand, ...] = (
     BotCommand(command="help", description="Справка"),
     BotCommand(command="settings", description="Настройки уведомлений"),
 )
+
+
+async def reset_menu_button(bot) -> bool:
+    """Сбросить кнопку меню Telegram к значению по умолчанию.
+
+    Раньше у бота была кнопка-Web App («Расписание»), ведущая на старый URL:
+    Mini App не разрабатывался, папки ``webapp/dist`` и ``/app/`` не существует,
+    поэтому кнопка открывала 503. Расписание внутри бота работает через
+    reply-клавиатуру и inline-кнопки — отдельный Web App не нужен.
+
+    Кнопка задаётся в BotFather, но ``set_chat_menu_button`` с
+    :class:`MenuButtonDefault` перекрывает её при каждом старте, поэтому
+    ручная правка в BotFather не требуется.
+
+    Args:
+        bot: экземпляр :class:`aiogram.Bot`.
+
+    Returns:
+        True, если кнопка сброшена; False — если Telegram не ответил
+        (не критично: бот продолжает работать, в логе остаётся предупреждение).
+    """
+    try:
+        await bot.set_chat_menu_button(menu_button=MenuButtonDefault())
+    except Exception as exc:
+        # Сетевые сбои и «menu button is not modified» не должны ронять старт.
+        logger.warning("could not reset menu button", extra={"error": repr(exc)})
+        return False
+    logger.info("menu button reset to default")
+    return True
 
 
 class RateLimitMiddleware(BaseMiddleware):
@@ -312,6 +341,10 @@ async def run_bot(settings: Settings, conn, shutdown_event=None) -> None:
                      extra={"error": repr(exc)})
         await bot.session.close()
         raise SystemExit(4) from exc
+
+    # Кнопка меню: убираем унаследованный Web App на старый URL (падал 503).
+    # Ошибка здесь не критична — бот продолжит работать (см. reset_menu_button).
+    await reset_menu_button(bot)
 
     web_runner = await start_web_server(conn, settings)
     if web_runner is None:

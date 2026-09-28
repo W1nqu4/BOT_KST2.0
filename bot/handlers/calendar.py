@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import logging
+from html import escape
 
 from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
@@ -53,26 +54,49 @@ ANDROID_INSTRUCTION = (
 )
 
 
+NO_LINKS_TEXT = (
+    "⚠️ <b>Ссылка недоступна</b>\n"
+    "PUBLIC_BASE_URL не задан в конфигурации сервера — "
+    "сообщи администратору."
+)
+
+NO_WEBCAL_TEXT = (
+    "ℹ️ Ссылка для iOS недоступна, используйте https:\n"
+    "<code>{link}</code>"
+)
+
+
 def calendar_kb(https_link: str, webcal_link: str) -> InlineKeyboardMarkup:
-    """Клавиатура интеграции: платформы, скачивание файла, проверка, назад."""
-    return InlineKeyboardMarkup(inline_keyboard=[
+    """Клавиатура интеграции: платформы, скачивание файла, проверка, назад.
+
+    Кнопка-ссылка «📥 Скачать .ics» добавляется только при непустом
+    ``https_link``: Telegram отвергает кнопки с пустым ``url``.
+    """
+    rows: list[list[InlineKeyboardButton]] = [
         [
             InlineKeyboardButton(text="📱 iPhone / iPad", callback_data="cal:ios"),
             InlineKeyboardButton(text="🤖 Android", callback_data="cal:android"),
         ],
-        [
+    ]
+    if https_link:
+        rows.append([
             InlineKeyboardButton(text="📥 Скачать .ics", url=https_link),
-        ],
-        [
-            InlineKeyboardButton(text="✅ Проверить", callback_data="cal:test"),
-            InlineKeyboardButton(text="🔙 Назад", callback_data="cal:back"),
-        ],
+        ])
+    rows.append([
+        InlineKeyboardButton(text="✅ Проверить", callback_data="cal:test"),
+        InlineKeyboardButton(text="🔙 Назад", callback_data="cal:back"),
     ])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 async def send_calendar_links(message: Message, conn, tg_id: int,
                               public_base_url: str) -> None:
-    """Показать персональные ссылки подписки и способы подключения."""
+    """Показать персональные ссылки подписки и способы подключения.
+
+    Пользователю НИКОГДА не показывается «None»: при незаданном
+    ``PUBLIC_BASE_URL`` приходит понятное объяснение. Если доступна только
+    https-ссылка (webcal пуст) — показываем её с пометкой.
+    """
     group = db.get_user_group(conn, tg_id)
     if not group:
         await message.answer(NO_GROUP_TEXT, parse_mode="HTML")
@@ -82,9 +106,22 @@ async def send_calendar_links(message: Message, conn, tg_id: int,
     https_link = ics_service.build_calendar_url(public_base_url, token)
     webcal_link = ics_service.build_webcal_url(public_base_url, token)
 
+    if not https_link and not webcal_link:
+        await message.answer(NO_LINKS_TEXT, parse_mode="HTML")
+        return
+
+    if not webcal_link:
+        await message.answer(
+            NO_WEBCAL_TEXT.format(link=https_link),
+            parse_mode="HTML",
+            reply_markup=calendar_kb(https_link, webcal_link),
+            disable_web_page_preview=True,
+        )
+        return
+
     text = (
         "📆 <b>Интеграция с календарём</b>\n\n"
-        f"🎓 Группа: <b>{group}</b>\n"
+        f"🎓 Группа: <b>{escape(group)}</b>\n"
         "📚 Горизонт: 60 дней вперёд\n\n"
         "<b>Ссылка для подписки (https):</b>\n"
         f"<code>{https_link}</code>\n\n"
@@ -100,8 +137,12 @@ async def send_calendar_links(message: Message, conn, tg_id: int,
 
 
 def _base_url(settings) -> str:
-    """Базовый URL приложения из настроек (пустая строка, если нет)."""
-    return getattr(settings, "public_base_url", "") if settings else ""
+    """Базовый URL приложения из настроек (нормализованный; "" если нет).
+
+    Нормализация гарантирует схему: ``bot.example.com`` → ``https://bot.example.com``.
+    """
+    raw = getattr(settings, "public_base_url", "") if settings else ""
+    return ics_service.normalize_base_url(raw)
 
 
 @router.message(F.text == BTN_CALENDAR)
@@ -123,14 +164,24 @@ async def btn_calendar(message: Message, conn, settings, state: FSMContext) -> N
 
 @router.callback_query(F.data == "cal:ios")
 async def cb_ios(callback: CallbackQuery, conn, settings) -> None:
-    """Инструкция для iOS с webcal-ссылкой."""
+    """Инструкция для iOS с webcal-ссылкой.
+
+    Если webcal недоступен (нет PUBLIC_BASE_URL) — показываем https-ссылку
+    вместо «None» в инструкции.
+    """
     token = ics_service.get_or_create_token(conn, callback.from_user.id)
-    link = ics_service.build_webcal_url(_base_url(settings), token)
+    base = _base_url(settings)
+    link = ics_service.build_webcal_url(base, token)
+    if not link:
+        link = ics_service.build_calendar_url(base, token)
     if callback.message is not None:
-        await callback.message.answer(
-            IOS_INSTRUCTION.format(link=link), parse_mode="HTML",
-            disable_web_page_preview=True,
-        )
+        if not link:
+            await callback.message.answer(NO_LINKS_TEXT, parse_mode="HTML")
+        else:
+            await callback.message.answer(
+                IOS_INSTRUCTION.format(link=link), parse_mode="HTML",
+                disable_web_page_preview=True,
+            )
     await callback.answer()
 
 
@@ -140,10 +191,13 @@ async def cb_android(callback: CallbackQuery, conn, settings) -> None:
     token = ics_service.get_or_create_token(conn, callback.from_user.id)
     link = ics_service.build_calendar_url(_base_url(settings), token)
     if callback.message is not None:
-        await callback.message.answer(
-            ANDROID_INSTRUCTION.format(link=link), parse_mode="HTML",
-            disable_web_page_preview=True,
-        )
+        if not link:
+            await callback.message.answer(NO_LINKS_TEXT, parse_mode="HTML")
+        else:
+            await callback.message.answer(
+                ANDROID_INSTRUCTION.format(link=link), parse_mode="HTML",
+                disable_web_page_preview=True,
+            )
     await callback.answer()
 
 

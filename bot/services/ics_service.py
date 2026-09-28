@@ -34,6 +34,7 @@ from bot.config import (
     ICS_TIMEZONE_NAME,
     TIMEZONE,
 )
+from bot.config import normalize_base_url as _normalize_base_url
 from bot.db import transaction
 from bot.services.deadline_service import days_left
 from bot.services.schedule_service import (
@@ -101,19 +102,51 @@ def get_tg_id_by_token(conn, token: str) -> int | None:
     return int(row["tg_id"]) if row is not None else None
 
 
+def normalize_base_url(url: str) -> str:
+    """Привести базовый URL к каноническому виду.
+
+    Реализация живёт в :func:`bot.config.normalize_base_url` (единый источник
+    правды: ту же функцию использует :meth:`bot.config.Settings.from_env`).
+    Здесь — реэкспорт, чтобы вызывающий код работал с ``ics_service``.
+
+    Args:
+        url: исходное значение.
+
+    Returns:
+        URL со схемой без завершающего слэша, либо ``""``.
+    """
+    return _normalize_base_url(url)
+
+
 def build_calendar_url(public_base_url: str, token: str) -> str:
-    """HTTPS-ссылка на .ics-файл для подписки."""
-    base = public_base_url.rstrip("/")
+    """HTTPS-ссылка на .ics-файл для подписки.
+
+    Args:
+        public_base_url: базовый URL приложения (нормализуется).
+        token: токен подписки.
+
+    Returns:
+        Ссылка вида ``https://host/calendar/<token>.ics``; **пустая строка**
+        (не ``None``), если базовый URL не задан.
+    """
+    base = normalize_base_url(public_base_url)
+    if not base:
+        return ""
     return f"{base}/calendar/{token}.ics"
 
 
 def build_webcal_url(public_base_url: str, token: str) -> str:
-    """Ссылка ``webcal://`` для iOS/macOS (открывает приложение «Календарь»)."""
-    https = build_calendar_url(public_base_url, token)
-    if https.startswith("https://"):
-        return "webcal://" + https[len("https://"):]
-    if https.startswith("http://"):
-        return "webcal://" + https[len("http://"):]
+    """Ссылка ``webcal://`` для iOS/macOS (открывает приложение «Календарь»).
+
+    Returns:
+        ``webcal://…`` либо **пустая строка** (не ``None``), если базовый URL
+        не задан. Раньше при URL без схемы функция возвращала ``None`` —
+        именно это показывалось пользователю как «webcal: None».
+    """
+    url = build_calendar_url(public_base_url, token)
+    if not url:
+        return ""
+    return url.replace("https://", "webcal://").replace("http://", "webcal://")
 def _ics_escape(text: str) -> str:
     """Экранировать значение для .ics.
 

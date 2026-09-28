@@ -88,6 +88,54 @@ def test_full_env_parsed(clean_env) -> None:
     assert settings.log_level == "DEBUG"
 
 
+# --- нормализация PUBLIC_BASE_URL ---
+
+@pytest.mark.parametrize(("raw", "expected"), [
+    ("https://kst24-kst24.up.railway.app", "https://kst24-kst24.up.railway.app"),
+    ("https://kst24-kst24.up.railway.app/", "https://kst24-kst24.up.railway.app"),
+    ("kst24-kst24.up.railway.app", "https://kst24-kst24.up.railway.app"),
+    ("bot-kst.amvera.io/", "https://bot-kst.amvera.io"),
+    ("http://localhost:8080", "http://localhost:8080"),
+])
+def test_public_base_url_normalized_on_load(clean_env, raw, expected) -> None:
+    """Значение из env приводится к каноническому виду (схема, без слэша)."""
+    clean_env.setenv("BOT_TOKEN", "123:ABC")
+    clean_env.setenv("PUBLIC_BASE_URL", raw)
+    assert Settings.from_env().public_base_url == expected
+
+
+def test_public_base_url_without_scheme_logs_warning(clean_env, caplog) -> None:
+    """URL без схемы: схема добавляется, но в лог уходит WARNING."""
+    clean_env.setenv("BOT_TOKEN", "123:ABC")
+    clean_env.setenv("PUBLIC_BASE_URL", "kst24-kst24.up.railway.app")
+
+    with caplog.at_level("WARNING"):
+        settings = Settings.from_env()
+
+    assert settings.public_base_url == "https://kst24-kst24.up.railway.app"
+    assert any("без схемы" in r.message for r in caplog.records), \
+        "должно быть предупреждение о добавленной схеме"
+
+
+def test_public_base_url_with_scheme_no_warning(clean_env, caplog) -> None:
+    """Корректный URL не порождает предупреждений."""
+    clean_env.setenv("BOT_TOKEN", "123:ABC")
+    clean_env.setenv("PUBLIC_BASE_URL", "https://kst24-kst24.up.railway.app")
+
+    with caplog.at_level("WARNING"):
+        Settings.from_env()
+
+    assert not [r for r in caplog.records if "без схемы" in r.message]
+
+
+def test_normalize_base_url_direct() -> None:
+    """Прямая проверка функции нормализации."""
+    assert config_module.normalize_base_url("example.com") == "https://example.com"
+    assert config_module.normalize_base_url("https://example.com/") == "https://example.com"
+    assert config_module.normalize_base_url("") == ""
+    assert config_module.normalize_base_url(None) == ""
+
+
 def test_invalid_port_and_chat_id_reported(clean_env) -> None:
     """Некорректные PORT и ADMIN_CHAT_ID попадают в единую ошибку."""
     clean_env.setenv("BOT_TOKEN", "123:ABC")

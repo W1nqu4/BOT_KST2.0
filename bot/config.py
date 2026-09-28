@@ -38,6 +38,35 @@ load_dotenv(dotenv_path=ENV_FILE, override=False)
 PLACEHOLDER_TOKEN: Final = "ВСТАВЬ_СЮДА_ТОКЕН_ОТ_BOTFATHER"
 
 
+def normalize_base_url(url: str) -> str:
+    """Привести базовый URL к каноническому виду.
+
+    Единственное место с этой логикой: функцию используют и настройки
+    (:meth:`Settings.from_env`), и :mod:`bot.services.ics_service`.
+    Живёт в ``config``, чтобы не было циклического импорта
+    (``ics_service`` уже импортирует константы из ``config``).
+
+    - обрезает пробелы и завершающий слэш;
+    - пустое значение остаётся пустым (сигнал «адрес не настроен»);
+    - URL без схемы получает ``https://`` (клиенты календарей без схемы
+      ссылку не открывают).
+
+    Args:
+        url: исходное значение (строка, ``None`` или мусор).
+
+    Returns:
+        URL со схемой без завершающего слэша, либо ``""``.
+    """
+    if not url:
+        return ""
+    cleaned = str(url).strip().rstrip("/")
+    if not cleaned:
+        return ""
+    if not cleaned.startswith(("http://", "https://")):
+        cleaned = "https://" + cleaned
+    return cleaned
+
+
 class ConfigError(RuntimeError):
     """Ошибка конфигурации: env-переменная отсутствует или некорректна.
 
@@ -148,15 +177,16 @@ class Settings:
                 "(шаблон: .env.example)"
             )
 
-        public_base_url = os.environ.get("PUBLIC_BASE_URL", "").strip().rstrip("/")
+        raw_base_url = os.environ.get("PUBLIC_BASE_URL", "").strip()
+        public_base_url = normalize_base_url(raw_base_url)
         if not public_base_url:
             errors.append("PUBLIC_BASE_URL: обязательная переменная пуста или не задана")
-        elif not public_base_url.startswith(("http://", "https://")):
-            # Не ошибка (бот запустится), но .ics-ссылки будут нерабочими:
-            # клиенты календарей требуют схему в URL.
+        elif raw_base_url and not raw_base_url.startswith(("http://", "https://")):
+            # Схема добавлена автоматически: бот запустится, но проверь адрес —
+            # именно он попадает в ссылки .ics-подписки.
             logger.warning(
-                "PUBLIC_BASE_URL не задан — .ics-ссылки будут некорректны",
-                extra={"public_base_url": public_base_url},
+                "PUBLIC_BASE_URL без схемы — добавлен https://",
+                extra={"raw": raw_base_url, "normalized": public_base_url},
             )
 
         port = _parse_port(os.environ.get("PORT", ""), errors)

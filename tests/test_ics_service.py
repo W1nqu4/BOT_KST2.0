@@ -89,6 +89,75 @@ def test_calendar_url_strips_trailing_slash() -> None:
     assert ics.build_calendar_url("https://x.io/", "t") == "https://x.io/calendar/t.ics"
 
 
+# --- normalize_base_url ---
+
+@pytest.mark.parametrize(("raw", "expected"), [
+    ("example.com", "https://example.com"),
+    ("https://example.com/", "https://example.com"),
+    ("", ""),
+    ("   ", ""),
+    (None, ""),
+    ("http://localhost:8080", "http://localhost:8080"),
+    ("http://localhost:8080/", "http://localhost:8080"),
+    ("  https://x.com//  ", "https://x.com"),
+    ("kst24-kst24.up.railway.app", "https://kst24-kst24.up.railway.app"),
+])
+def test_normalize_base_url(raw, expected) -> None:
+    """Нормализация: срез слэша, схема https:// при её отсутствии, "" для пустого."""
+    assert ics.normalize_base_url(raw) == expected
+
+
+def test_normalize_base_url_is_same_as_config() -> None:
+    """Логика одна: ics_service реэкспортирует функцию из config."""
+    from bot.config import normalize_base_url as from_config
+
+    assert ics.normalize_base_url("example.com") == from_config("example.com")
+
+
+# --- пустой базовый URL: пустая строка, НЕ None ---
+
+def test_build_calendar_url_empty_returns_empty_string() -> None:
+    """Не задан базовый URL → "" (раньше могло получиться "/calendar/....ics")."""
+    assert ics.build_calendar_url("", "abc") == ""
+
+
+def test_build_webcal_url_empty_returns_empty_string() -> None:
+    """Не задан базовый URL → "" (НЕ None) — иначе в UI появлялось «webcal: None»."""
+    assert ics.build_webcal_url("", "abc") == ""
+    assert ics.build_webcal_url("", "abc") is not None
+
+
+def test_urls_never_return_none() -> None:
+    """Ни одна из функций не возвращает None ни при каком входе."""
+    for raw in ("", "   ", None, "example.com", "https://x.com/"):
+        assert ics.build_calendar_url(raw, "t") is not None
+        assert ics.build_webcal_url(raw, "t") is not None
+
+
+def test_build_webcal_url_with_scheme() -> None:
+    assert ics.build_webcal_url("https://x.com", "abc") == (
+        "webcal://x.com/calendar/abc.ics"
+    )
+
+
+def test_build_webcal_url_without_scheme() -> None:
+    """Базовый URL без схемы: раньше функция возвращала None (баг)."""
+    assert ics.build_webcal_url("x.com", "abc") == "webcal://x.com/calendar/abc.ics"
+
+
+def test_build_calendar_url_without_scheme_adds_https() -> None:
+    assert ics.build_calendar_url("example.com", "t") == (
+        "https://example.com/calendar/t.ics"
+    )
+
+
+def test_build_webcal_url_converts_http() -> None:
+    """http:// тоже превращается в webcal:// (локальная отладка)."""
+    assert ics.build_webcal_url("http://localhost:8080", "t") == (
+        "webcal://localhost:8080/calendar/t.ics"
+    )
+
+
 # --- экранирование ---
 
 @pytest.mark.parametrize(("raw", "expected"), [

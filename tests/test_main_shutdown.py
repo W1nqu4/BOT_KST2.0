@@ -84,6 +84,8 @@ class RecordingBot:
         self.messages: list[tuple[int, str]] = []
         self.commands: list = []
         self.closed = False
+        self.menu_button = "НЕ ВЫЗЫВАЛОСЬ"
+        self.menu_calls: list = []
 
     async def send_message(self, chat_id, text, **kwargs):
         self.messages.append((chat_id, text))
@@ -91,6 +93,13 @@ class RecordingBot:
 
     async def set_my_commands(self, commands, **kwargs):
         self.commands = list(commands)
+        return True
+
+    async def set_chat_menu_button(self, chat_id=None, menu_button=None,
+                                   request_timeout=None):
+        """Заглушка сброса кнопки меню: запоминаем переданный объект."""
+        self.menu_button = menu_button
+        self.menu_calls.append(menu_button)
         return True
 
     class _Session:
@@ -232,6 +241,69 @@ async def test_run_bot_sets_commands(conn, monkeypatch) -> None:
     await asyncio.wait_for(runner, timeout=5)
 
     assert [c.command for c in fake_bot.commands] == ["start", "help", "settings"]
+
+
+# --- кнопка меню (Menu Button) ---
+
+async def test_reset_menu_button_sends_default(monkeypatch) -> None:
+    """Сброс кнопки меню отправляет MenuButtonDefault."""
+    import bot.main as main_module
+    from aiogram.types import MenuButtonDefault as Expected
+
+    bot = RecordingBot()
+    result = await main_module.reset_menu_button(bot)
+
+    assert result is True
+    assert isinstance(bot.menu_button, Expected)
+    assert bot.menu_button.type == "default"
+    assert bot.menu_button.web_app is None, "Web App не должен остаться"
+
+
+async def test_reset_menu_button_is_not_webapp() -> None:
+    """Кнопка меню не содержит WebAppInfo (именно она вела на старый URL)."""
+    import bot.main as main_module
+
+    bot = RecordingBot()
+    await main_module.reset_menu_button(bot)
+
+    assert getattr(bot.menu_button, "web_app", None) is None
+    assert getattr(bot.menu_button, "text", None) is None
+
+
+async def test_reset_menu_button_survives_telegram_error() -> None:
+    """Ошибка Telegram не роняет старт: возвращаем False."""
+    import bot.main as main_module
+
+    class BrokenBot:
+        async def set_chat_menu_button(self, **kwargs):
+            raise RuntimeError("Telegram недоступен")
+
+    assert await main_module.reset_menu_button(BrokenBot()) is False
+
+
+async def test_run_bot_resets_menu_button(conn, monkeypatch) -> None:
+    """При старте бот сбрасывает кнопку меню (в логе «menu button reset»)."""
+    import bot.main as main_module
+
+    class FakeRunner:
+        async def cleanup(self):
+            return None
+
+    fake_bot = RecordingBot()
+    monkeypatch.setattr(main_module, "build_bot", lambda settings: fake_bot)
+    monkeypatch.setattr(main_module, "build_dispatcher", _fake_dispatcher())
+    monkeypatch.setattr(main_module, "build_background_tasks", lambda *a, **k: [])
+    monkeypatch.setattr(main_module, "start_web_server",
+                        lambda *a, **k: _async_value(FakeRunner()))
+
+    event = asyncio.Event()
+    runner = asyncio.create_task(run_bot(_settings(), conn, shutdown_event=event))
+    await asyncio.sleep(0.1)
+    event.set()
+    await asyncio.wait_for(runner, timeout=5)
+
+    assert len(fake_bot.menu_calls) == 1, "кнопка меню должна сбрасываться один раз"
+    assert getattr(fake_bot.menu_button, "web_app", None) is None
 
 
 async def test_install_signal_handlers_is_safe() -> None:
