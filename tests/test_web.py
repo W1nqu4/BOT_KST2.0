@@ -60,7 +60,7 @@ async def test_health_ok(client) -> None:
     for key in ("schema_version", "users_count", "last_schedule_update",
                 "lessons_cached", "checked_at"):
         assert key in payload, f"нет ключа {key}"
-    assert payload["schema_version"] == 5
+    assert payload["schema_version"] == 7
     assert payload["users_count"] == 1
     assert payload["lessons_cached"] > 1000
 

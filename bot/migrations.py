@@ -210,12 +210,66 @@ def migrate_5_notifications_enabled(conn: sqlite3.Connection) -> None:
     )
 
 
+def migrate_6_group_chats(conn: sqlite3.Connection) -> None:
+    """Миграция 5 → 6: таблица ``group_chats`` — привязка чатов к группам КСТ.
+
+    Админ группы/канала пишет ``/setup 25КАД``, и чат начинает получать
+    уведомления о заменах этой группы. Соглашения по типам — как в остальной
+    схеме:
+
+    - ``chat_id`` — PRIMARY KEY: у Telegram он уникален, поэтому при повторном
+      ``/setup`` запись **перезаписывается** (один чат — одна группа);
+    - ``chat_type`` — 'group' | 'supergroup' | 'channel';
+    - ``notifications_enabled`` — INTEGER 0/1, по умолчанию 1;
+    - ``added_at`` — ISO-8601 с поясом техникума (как ``users.created_at``).
+
+    Одна группа КСТ может быть привязана к нескольким чатам — это нормально,
+    поэтому по ``group_name`` создаётся индекс, а не уникальный ключ.
+    """
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS group_chats (
+            chat_id               INTEGER PRIMARY KEY,
+            chat_title            TEXT,
+            chat_type             TEXT    NOT NULL,
+            group_name            TEXT    NOT NULL,
+            added_by              INTEGER NOT NULL,
+            added_at              TEXT    NOT NULL,
+            notifications_enabled INTEGER NOT NULL DEFAULT 1
+        )
+    """)
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_group_chats_group"
+        " ON group_chats (group_name)"
+    )
+
+
+def migrate_7_group_chat_full_schedule(conn: sqlite3.Connection) -> None:
+    """Миграция 6 → 7: дата последнего полного расписания для чата.
+
+    В чат отправляется ПОЛНОЕ расписание на завтра, а не карточки замен.
+    Рассылка ходит каждые 15 минут, и за вечер может прийти несколько новых
+    замен — без этой колонки каждый цикл отправлял бы расписание заново
+    (спам). Поэтому запоминаем дату, на которую расписание уже ушло:
+    повторно на ту же дату не отправляем.
+
+    NULL означает «ещё не отправляли» (для существующих строк тоже NULL —
+    это корректно: после обновления расписание уйдёт один раз при первой
+    же новой замене).
+    """
+    conn.execute(
+        "ALTER TABLE group_chats"
+        " ADD COLUMN last_full_schedule_sent_date TEXT"
+    )
+
+
 MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     1: migrate_1_initial,
     2: migrate_2_add_self_study,
     3: migrate_3_deadline_date_nullable,
     4: migrate_4_calendar_tokens,
     5: migrate_5_notifications_enabled,
+    6: migrate_6_group_chats,
+    7: migrate_7_group_chat_full_schedule,
 }
 
 

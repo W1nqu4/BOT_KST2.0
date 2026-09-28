@@ -56,6 +56,9 @@ BOT_COMMANDS: tuple[BotCommand, ...] = (
     BotCommand(command="start", description="Начать / сменить группу"),
     BotCommand(command="help", description="Справка"),
     BotCommand(command="settings", description="Настройки уведомлений"),
+    BotCommand(command="setup", description="Привязать чат к группе КСТ"),
+    BotCommand(command="unsync", description="Отвязать чат от группы"),
+    BotCommand(command="schedule", description="Расписание на сегодня в чат"),
 )
 
 

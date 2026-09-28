@@ -219,6 +219,8 @@ async def test_run_bot_stops_on_shutdown_event(conn, monkeypatch) -> None:
     assert bot_holder[0].closed, "сессия бота должна быть закрыта"
 
 
+# --- set_my_commands: команды чатов в списке ---
+
 async def test_run_bot_sets_commands(conn, monkeypatch) -> None:
     """При старте бот регистрирует команды в меню Telegram."""
     import bot.main as main_module
@@ -240,7 +242,9 @@ async def test_run_bot_sets_commands(conn, monkeypatch) -> None:
     event.set()
     await asyncio.wait_for(runner, timeout=5)
 
-    assert [c.command for c in fake_bot.commands] == ["start", "help", "settings"]
+    assert [c.command for c in fake_bot.commands] == [
+        "start", "help", "settings", "setup", "unsync", "schedule",
+    ]
 
 
 # --- кнопка меню (Menu Button) ---

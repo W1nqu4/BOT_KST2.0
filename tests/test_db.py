@@ -17,12 +17,15 @@ EXPECTED_TABLES = {
     "substitutions_cache",
     "sent_notifications",
     "meta",
+    "calendar_tokens",
+    "group_chats",
 }
 EXPECTED_INDEXES = {
     "idx_users_group_name",
     "idx_deadlines_tg_id_deadline_date",
     "idx_schedule_cache_group_day_para",
     "idx_substitutions_cache_group_date",
+    "idx_group_chats_group",
 }
 
 
@@ -72,6 +75,63 @@ def test_apply_migrations_idempotent(conn: sqlite3.Connection) -> None:
     count = conn.execute("SELECT COUNT(*) FROM schema_version").fetchone()[0]
     assert count == 1
 
+
+def test_mark_group_chat_full_sent(conn: sqlite3.Connection) -> None:
+    """Отметка о полном расписании сохраняется и обновляется."""
+    from bot import db
+
+    apply_migrations(conn)
+    db.add_group_chat(conn, -100500, "КСТ", "supergroup", "26КАД", 1)
+    assert db.get_group_chat(conn, -100500)["last_full_schedule_sent_date"] is None
+
+    assert db.mark_group_chat_full_sent(conn, -100500, "2026-09-29") is True
+    assert db.get_group_chat(
+        conn, -100500
+    )["last_full_schedule_sent_date"] == "2026-09-29"
+
+    # Повторная отметка на другую дату перезаписывает.
+    db.mark_group_chat_full_sent(conn, -100500, "2026-09-30")
+    assert db.get_group_chat(
+        conn, -100500
+    )["last_full_schedule_sent_date"] == "2026-09-30"
+
+    # Неизвестный чат — False, без исключения.
+    assert db.mark_group_chat_full_sent(conn, 424242, "2026-09-30") is False
+
+
+def test_group_chat_helpers(conn: sqlite3.Connection) -> None:
+    """CRUD привязок: добавление, перезапись, чтение, удаление."""
+    from bot import db
+
+    apply_migrations(conn)
+
+    db.add_group_chat(conn, -100500, "КСТ 26КАД", "supergroup", "26КАД", 1)
+    db.add_group_chat(conn, -100600, "КСТ 26КАД", "group", "26КАД", 2)
+    db.add_group_chat(conn, -100700, "КСТ 26МЭГ", "channel", "26МЭГ", 3)
+
+    assert len(db.get_all_group_chats(conn)) == 3
+    assert len(db.get_group_chats_for_group(conn, "26КАД")) == 2
+    assert len(db.get_group_chats_for_group(conn, "26МЭГ")) == 1
+    assert sorted(db.get_all_notify_groups(conn)) == ["26КАД", "26МЭГ"]
+
+    # Один chat_id — одна группа: повторный вызов перезаписывает.
+    db.add_group_chat(conn, -100500, "КСТ 26МЭГ", "supergroup", "26МЭГ", 4)
+    assert db.get_group_chat(conn, -100500)["group_name"] == "26МЭГ"
+    assert len(db.get_all_group_chats(conn)) == 3
+    # 26КАД остался только в чате -100600.
+    assert len(db.get_group_chats_for_group(conn, "26КАД")) == 1
+
+    # Выключенные уведомления исключают чат из рассылки.
+    with transaction(conn):
+        conn.execute(
+            "UPDATE group_chats SET notifications_enabled = 0 WHERE chat_id = ?",
+            (-100600,),
+        )
+    assert db.get_group_chats_for_group(conn, "26КАД") == []
+
+    assert db.remove_group_chat(conn, -100500) is True
+    assert db.get_group_chat(conn, -100500) is None
+    assert db.remove_group_chat(conn, -100500) is False
 
 def test_insert_and_read_user(conn: sqlite3.Connection) -> None:
     apply_migrations(conn)

@@ -26,7 +26,11 @@ from bot.config import (
 )
 from bot.services import cache_service
 from bot.services import deadline_service as dl
-from bot.services.schedule_service import _sleep, time_range_for_date
+from bot.services.schedule_service import (
+    _sleep,
+    time_range_for_date,
+    week_type_for_date,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -436,6 +440,119 @@ async def _send_to_user(conn, bot, tg_id: int, texts: list[str]) -> bool:
         return False
 
 
+def build_full_schedule_for_chat(conn, group: str, target: date,
+                                 new_subs_anyway: bool) -> list[str]:
+    """Полное расписание на дату для группового чата/канала.
+
+    В чатах и каналах отправляем не карточки замен (как в личке), а всё
+    расписание на завтра — так его читают и те, кто не подписан на бота
+    лично, и замена видна в контексте дня.
+
+    Карточки собирает :func:`bot.handlers.schedule.render_day`, поэтому
+    иконки 📚/🔁/❌/📖 и порядок строк совпадают с личкой и экраном бота.
+
+    Args:
+        conn: соединение SQLite.
+        group: имя группы КСТ.
+        target: дата расписания (обычно завтра).
+        new_subs_anyway: слать ли расписание, когда новых замен нет.
+            False (нет новых замен) → пустой список: иначе каждые 15 минут
+            в чат уходило бы одно и то же расписание.
+
+    Returns:
+        Список сообщений (одно или несколько, с разбивкой по 4096 символов);
+        пустой список — если отправлять нечего.
+    """
+    if not new_subs_anyway:
+        return []
+
+    # Импорт внутри функции: ``bot.handlers.schedule`` тянет aiogram-хендлеры,
+    # а ``notify_service`` импортируется из ``bot.main`` — иначе получился бы
+    # цикл на этапе загрузки модулей.
+    from bot.handlers.schedule import render_day
+    from bot.services.schedule_service import (
+        apply_substitutions,
+        get_lessons_for_day,
+    )
+
+    lessons = get_lessons_for_day(conn, group, target)
+    lessons = apply_substitutions(conn, lessons, group, target)
+
+    header = (
+        f"🔔 <b>Замены на завтра · {escape(group)}</b>\n"
+        f"<i>{escape(weekday_name(target))}, {target.strftime('%d.%m.%Y')} · "
+        f"Число {target.day} → {escape(week_type_for_date(target))}</i>"
+    )
+    footer = "<i>Подробности — в боте в личке: @kst24_bot</i>"
+
+    if not lessons:
+        empty = (
+            f"🎉 <b>На завтра пар нет</b> · {escape(group)}\n"
+            f"<i>{escape(weekday_name(target))}, "
+            f"{target.strftime('%d.%m.%Y')}</i>"
+        )
+        return [empty]
+
+    # render_day даёт готовую шапку и карточки; берём только «хвост» карточек,
+    # чтобы своя шапка (с пометкой про замены) осталась на месте.
+    rendered = render_day(group, target, lessons)
+    blocks = [block for block in rendered.split("\n\n")[1:] if block]
+    return split_blocks(header, blocks, footer)
+
+
+async def _send_to_chat(conn, bot, chat_id: int, texts: list[str]) -> bool:
+    """Отправить сообщения в групповой чат/канал.
+
+    Обрабатывает те же ожидаемые ошибки Telegram, что и личная отправка:
+
+    - ``TelegramForbiddenError`` — бота удалили из чата (или он потерял
+      право писать): привязку удаляем, иначе рассылка будет биться туда
+      каждый проход;
+    - ``TelegramRetryAfter`` — флуд-контроль: ждём и делаем одну попытку.
+
+    Args:
+        conn: соединение SQLite.
+        bot: объект Bot.
+        chat_id: получатель (чат/канал).
+        texts: список сообщений.
+
+    Returns:
+        True, если все сообщения ушли.
+    """
+    async def _deliver() -> None:
+        for text in texts:
+            await bot.send_message(chat_id, text, parse_mode="HTML")
+
+    try:
+        await _deliver()
+        return True
+    except TelegramForbiddenError:
+        db.remove_group_chat(conn, chat_id)
+        logger.info("group chat unlinked (bot removed or forbidden)",
+                    extra={"chat_id": chat_id})
+        return False
+    except TelegramRetryAfter as exc:
+        pause = int(getattr(exc, "retry_after", 1)) + 1
+        logger.warning("flood control in chat, retrying",
+                       extra={"chat_id": chat_id, "retry_after": pause})
+        await asyncio.sleep(pause)
+        try:
+            await _deliver()
+            return True
+        except TelegramForbiddenError:
+            db.remove_group_chat(conn, chat_id)
+            logger.info("group chat unlinked after retry",
+                        extra={"chat_id": chat_id})
+            return False
+        except Exception:
+            logger.warning("chat retry failed", extra={"chat_id": chat_id})
+            return False
+    except Exception as exc:
+        logger.warning("chat send failed",
+                       extra={"chat_id": chat_id, "error": repr(exc)})
+        return False
+
+
 async def _process_substitutions(conn, bot, target: date,
                                  throttle: bool = True) -> int:
     """Разослать замены на дату группам с активными подписчиками.
@@ -457,7 +574,7 @@ async def _process_substitutions(conn, bot, target: date,
     Returns:
         Количество успешно отправленных сообщений.
     """
-    groups = db.get_notify_groups(conn)
+    groups = db.get_all_notify_groups(conn)
     if not groups:
         return 0
 
@@ -495,6 +612,26 @@ async def _process_substitutions(conn, bot, target: date,
                     sent += 1
                 if throttle and NOTIFY_SEND_DELAY_SECONDS:
                     await asyncio.sleep(NOTIFY_SEND_DELAY_SECONDS)
+
+        # Чаты и каналы этой группы (шаг 2). Им уходит ПОЛНОЕ расписание на
+        # завтра, а не карточки замен. Дедупликация по дате: за вечер может
+        # прийти несколько новых замен (несколько циклов), но расписание
+        # отправляем один раз — иначе каждые 15 минут был бы новый спам.
+        chats = db.get_group_chats_for_group(conn, group)
+        if chats and new_subs:
+            for chat in chats:
+                chat_id = int(chat["chat_id"])
+                if chat.get("last_full_schedule_sent_date") == date_iso:
+                    continue      # расписание на эту дату уже отправлено
+                chat_texts = build_full_schedule_for_chat(
+                    conn, group, target, True
+                )
+                async with semaphore:
+                    if await _send_to_chat(conn, bot, chat_id, chat_texts):
+                        sent += 1
+                        db.mark_group_chat_full_sent(conn, chat_id, date_iso)
+                    if throttle and NOTIFY_SEND_DELAY_SECONDS:
+                        await asyncio.sleep(NOTIFY_SEND_DELAY_SECONDS)
 
         # Помечаем отправленным даже если у группы не оказалось подписчиков:
         # иначе при первой же регистрации студент получит старые замены.

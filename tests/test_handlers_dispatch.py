@@ -134,14 +134,16 @@ async def _register(dp: Dispatcher, bot: FakeBot) -> None:
 
 
 def test_bot_commands_declared() -> None:
-    """set_my_commands получает start/help/settings."""
-    assert [c.command for c in BOT_COMMANDS] == ["start", "help", "settings"]
+    """set_my_commands получает start/help/settings + команды чатов (шаг 2)."""
+    assert [c.command for c in BOT_COMMANDS] == [
+        "start", "help", "settings", "setup", "unsync", "schedule",
+    ]
 
 
 def test_dispatcher_includes_conn(dp, conn) -> None:
     """Диспетчер отдаёт хендлерам соединение БД."""
     assert dp.workflow_data["conn"] is conn
-    assert len(all_routers()) == 7
+    assert len(all_routers()) == 8
 
 
 async def test_start_asks_for_group_when_unregistered(dp, conn_with_groups) -> None:

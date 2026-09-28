@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+from bot import db
 from bot.db import get_connection, transaction
 from bot.migrations import apply_migrations
 from bot.services import deadline_service as dl
@@ -252,6 +253,19 @@ def conn_with_users(tmp_path: Path):
     c.close()
 
 
+@pytest.fixture()
+def conn_chat(conn_with_users, parsed_schedule):
+    """БД с пользователем и РЕАЛЬНЫМ расписанием.
+
+    Нужна тестам полного расписания в чат: без кэша занятий в чат уходила бы
+    только «замена вне плана», и проверить карточки дня было бы нельзя.
+    """
+    from bot.services import cache_service
+
+    cache_service.save_schedule(conn_with_users, parsed_schedule)
+    return conn_with_users
+
+
 # --- substitution_signature ---
 
 def test_signature_stable() -> None:
@@ -433,6 +447,17 @@ def _seed(conn, subs: list[dict]) -> None:
     cache_service.save_substitutions(conn, subs)
 
 
+def _drop_personal_users(conn) -> None:
+    """Убрать личных подписчиков: тест проверяет только чаты.
+
+    Фикстура ``conn_with_users`` создаёт пользователя в 26КАД, поэтому для
+    сценариев «только чат» его нужно удалить — иначе рассылка уйдёт и в личку
+    и счётчики будут другими.
+    """
+    with transaction(conn):
+        conn.execute("DELETE FROM users")
+
+
 async def test_process_sends_to_both_users_once(conn_with_users) -> None:
     """Двое в группе, одна замена → оба получили ровно один раз."""
     _add_user(conn_with_users, USER_ID)
@@ -492,6 +517,254 @@ async def test_process_deactivates_blocked_user(conn_with_users) -> None:
     assert await ns._process_substitutions(conn_with_users, bot, TARGET,
                                            throttle=False) == 0
     assert bot.sent == []
+
+
+# --- рассылка в чаты групп (шаг 2) ---
+
+async def test_process_sends_to_two_users_and_chat(conn_with_users) -> None:
+    """Новая замена: 2 личных подписчика + 1 чат получили."""
+    _drop_personal_users(conn_with_users)
+    _add_user(conn_with_users, USER_ID)
+    _add_user(conn_with_users, 556)
+    _seed(conn_with_users, [SUB_FULL])
+    db.add_group_chat(conn_with_users, -100500, "КСТ 26КАД", "supergroup",
+                      "26КАД", USER_ID)
+
+    bot = FakeBot()
+    sent = await ns._process_substitutions(conn_with_users, bot, TARGET,
+                                           throttle=False)
+
+    assert sent == 3, "двое личных + один чат"
+    recipients = [m.get("chat_id") for m in bot.sent]
+    assert sorted(recipients) == sorted([USER_ID, 556, -100500])
+
+
+async def test_process_chat_gets_full_schedule_not_cards(
+        conn_chat) -> None:
+    """В чат уходит ПОЛНОЕ расписание, а не карточки замен."""
+    _drop_personal_users(conn_chat)
+    _seed(conn_chat, [SUB_FULL])
+    db.add_group_chat(conn_chat, -100500, "КСТ", "supergroup",
+                      "26КАД", USER_ID)
+    bot = FakeBot()
+
+    await ns._process_substitutions(conn_chat, bot, TARGET, throttle=False)
+
+    chat_messages = [m["text"] for m in bot.sent
+                     if m.get("chat_id") == -100500 and m["text"]]
+    assert len(chat_messages) == 1
+    body = chat_messages[0]
+
+    # Шапка группового формата с пометкой про замены и чётностью дня.
+    assert "🔔 <b>Замены на завтра · 26КАД</b>" in body
+    assert "Понедельник, 28.09.2026" in body
+    assert "Число 28 →" in body
+    assert "@kst24_bot" in body
+
+    # Полное расписание дня: плановые пары тоже присутствуют (📚), а не только
+    # заменённая. В личку при этом уходят исключительно карточки замен.
+    assert "📚 <b>" in body, "должны быть плановые пары дня"
+    assert "🔁 <b>2 пара</b>" in body, "замена помечена иконкой 🔁"
+    assert body.count("пара</b>") >= 3, "в понедельник несколько пар"
+
+
+async def test_process_chat_full_schedule_marked_sent(
+        conn_chat) -> None:
+    """После отправки проставляется дата последнего полного расписания."""
+    _drop_personal_users(conn_chat)
+    _seed(conn_chat, [SUB_FULL])
+    db.add_group_chat(conn_chat, -100500, "КСТ", "supergroup",
+                      "26КАД", USER_ID)
+
+    await ns._process_substitutions(conn_chat, FakeBot(), TARGET,
+                                    throttle=False)
+
+    link = db.get_group_chat(conn_chat, -100500)
+    assert link["last_full_schedule_sent_date"] == TARGET.isoformat()
+
+
+async def test_process_chat_no_resend_same_day_new_subs(
+        conn_chat) -> None:
+    """Вторая новая замена в тот же день → расписание НЕ отправляется снова."""
+    _drop_personal_users(conn_chat)
+    db.add_group_chat(conn_chat, -100500, "КСТ", "supergroup",
+                      "26КАД", USER_ID)
+
+    # Первый цикл: замена на пару 2.
+    _seed(conn_chat, [SUB_FULL])
+    first_bot = FakeBot()
+    first = await ns._process_substitutions(conn_chat, first_bot,
+                                            TARGET, throttle=False)
+    assert first == 1
+
+    # Второй цикл: пришла ещё одна замена на тот же день.
+    another = dict(SUB_FULL, para=3, old_subject="ОД.03 История",
+                   new_subject="ОД.12 Химия")
+    _seed(conn_chat, [SUB_FULL, another])
+    second_bot = FakeBot()
+    second = await ns._process_substitutions(conn_chat, second_bot,
+                                             TARGET, throttle=False)
+
+    assert second == 0, "полное расписание на ту же дату повторять нельзя"
+    assert second_bot.sent == []
+
+
+async def test_process_chat_sends_full_schedule_next_day(
+        conn_chat) -> None:
+    """Новая замена на СЛЕДУЮЩИЙ день → расписание отправляется снова."""
+    _drop_personal_users(conn_chat)
+    db.add_group_chat(conn_chat, -100500, "КСТ", "supergroup",
+                      "26КАД", USER_ID)
+
+    _seed(conn_chat, [SUB_FULL])
+    await ns._process_substitutions(conn_chat, FakeBot(), TARGET,
+                                    throttle=False)
+
+    next_day = TARGET + timedelta(days=1)
+    _seed(conn_chat, [SUB_FULL,
+                      dict(SUB_FULL, date_iso=next_day.isoformat())])
+    bot = FakeBot()
+    sent = await ns._process_substitutions(conn_chat, bot, next_day,
+                                           throttle=False)
+
+    assert sent == 1, "на новую дату расписание должно уйти"
+    assert bot.sent[0]["chat_id"] == -100500
+    assert db.get_group_chat(
+        conn_chat, -100500
+    )["last_full_schedule_sent_date"] == next_day.isoformat()
+
+
+async def test_process_chat_empty_day_message(conn_chat) -> None:
+    """Пар нет → «🎉 На завтра пар нет» с группой и датой.
+
+    Проверяем на реальном расписании: у 26КАД в воскресенье пар нет.
+    Замен на этот день не подкладываем — иначе «замена вне плана» из
+    :func:`apply_substitutions` добавила бы пару и день перестал быть пустым.
+    """
+    _drop_personal_users(conn_chat)
+    empty_day = date(2026, 9, 27)          # воскресенье, пар нет
+    assert empty_day.weekday() == 6
+
+    texts = ns.build_full_schedule_for_chat(conn_chat, "26КАД", empty_day, True)
+    assert len(texts) == 1
+    body = texts[0]
+    assert "🎉 <b>На завтра пар нет</b> · 26КАД" in body
+    assert "Воскресенье, 27.09.2026" in body
+
+
+async def test_process_chat_only_without_personal_subscribers(
+        conn_with_users) -> None:
+    """Чат привязан, личных подписчиков нет → рассылка всё равно идёт."""
+    _drop_personal_users(conn_with_users)
+    _seed(conn_with_users, [SUB_FULL])
+    db.add_group_chat(conn_with_users, -100500, "КСТ", "supergroup",
+                      "26КАД", USER_ID)
+    bot = FakeBot()
+
+    sent = await ns._process_substitutions(conn_with_users, bot, TARGET,
+                                           throttle=False)
+
+    assert sent == 1
+    assert bot.sent[0]["chat_id"] == -100500
+
+
+async def test_process_removes_chat_on_forbidden(conn_with_users) -> None:
+    """TelegramForbiddenError в чате → chat_id удалён из БД."""
+    from aiogram.exceptions import TelegramForbiddenError
+
+    _drop_personal_users(conn_with_users)
+    _seed(conn_with_users, [SUB_FULL])
+    db.add_group_chat(conn_with_users, -100500, "КСТ", "supergroup",
+                      "26КАД", USER_ID)
+
+    class ForbiddenBot(FakeBot):
+        """Bot, который в чате отвечает «запрещено»."""
+
+        async def __call__(self, method, request_timeout=None):
+            if getattr(method, "chat_id", None) == -100500:
+                raise TelegramForbiddenError(method=method, message="no rights")
+            return await super().__call__(method, request_timeout)
+
+    sent = await ns._process_substitutions(conn_with_users, ForbiddenBot(),
+                                           TARGET, throttle=False)
+
+    assert sent == 0
+    assert db.get_group_chat(conn_with_users, -100500) is None, \
+        "мёртвая привязка должна быть удалена"
+
+
+async def test_process_chat_dedup_second_run(conn_with_users) -> None:
+    """Повторный запуск → никому: ни личке, ни чату (общий дедуп)."""
+    _drop_personal_users(conn_with_users)
+    _add_user(conn_with_users, USER_ID)
+    _seed(conn_with_users, [SUB_FULL])
+    db.add_group_chat(conn_with_users, -100500, "КСТ", "supergroup",
+                      "26КАД", USER_ID)
+
+    first_bot = FakeBot()
+    first = await ns._process_substitutions(conn_with_users, first_bot,
+                                            TARGET, throttle=False)
+    second_bot = FakeBot()
+    second = await ns._process_substitutions(conn_with_users, second_bot,
+                                             TARGET, throttle=False)
+
+    assert first == 2
+    assert second == 0
+    assert second_bot.sent == []
+
+
+async def test_process_chats_of_other_groups_not_notified(
+        conn_with_users) -> None:
+    """Чат другой группы не получает замены этой группы."""
+    _drop_personal_users(conn_with_users)
+    _seed(conn_with_users, [SUB_FULL])
+    db.add_group_chat(conn_with_users, -100777, "КСТ 26МЭГ", "supergroup",
+                      "26МЭГ", USER_ID)
+    bot = FakeBot()
+
+    sent = await ns._process_substitutions(conn_with_users, bot, TARGET,
+                                           throttle=False)
+
+    assert sent == 0
+    assert bot.sent == []
+
+
+async def test_process_group_without_notifications_disabled_chat(
+        conn_with_users) -> None:
+    """Чат с выключенными уведомлениями не получает рассылку."""
+    _drop_personal_users(conn_with_users)
+    _seed(conn_with_users, [SUB_FULL])
+    db.add_group_chat(conn_with_users, -100500, "КСТ", "supergroup",
+                      "26КАД", USER_ID)
+    with transaction(conn_with_users):
+        conn_with_users.execute(
+            "UPDATE group_chats SET notifications_enabled = 0 WHERE chat_id = ?",
+            (-100500,),
+        )
+    bot = FakeBot()
+
+    sent = await ns._process_substitutions(conn_with_users, bot, TARGET,
+                                           throttle=False)
+
+    assert sent == 0
+    assert bot.sent == []
+
+
+async def test_process_multiple_chats_same_group(conn_with_users) -> None:
+    """Одна группа в нескольких чатах — рассылка идёт во все."""
+    _drop_personal_users(conn_with_users)
+    _seed(conn_with_users, [SUB_FULL])
+    db.add_group_chat(conn_with_users, -100500, "Чат A", "supergroup",
+                      "26КАД", USER_ID)
+    db.add_group_chat(conn_with_users, -100600, "Чат B", "group",
+                      "26КАД", USER_ID)
+    bot = FakeBot()
+
+    sent = await ns._process_substitutions(conn_with_users, bot, TARGET,
+                                           throttle=False)
+
+    assert sent == 2
+    assert {m["chat_id"] for m in bot.sent} == {-100500, -100600}
 
 
 async def test_process_no_users_in_group(conn_with_users) -> None:

@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 from bot.db import get_connection, transaction
-from bot.migrations import apply_migrations
+from bot.migrations import MIGRATIONS, apply_migrations
 from bot.services import backup_service as bs
 
 
@@ -58,7 +58,7 @@ def test_backup_is_valid_sqlite_copy(db_path: Path) -> None:
         version = copy_conn.execute(
             "SELECT version FROM schema_version"
         ).fetchone()[0]
-        assert version == 5
+        assert version == max(MIGRATIONS)
     finally:
         copy_conn.close()
 

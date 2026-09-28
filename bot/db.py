@@ -358,3 +358,140 @@ def set_notifications_enabled(conn: sqlite3.Connection, tg_id: int,
             (1 if enabled else 0, tg_id),
         )
     return True
+
+
+# ==========================================================================
+# Чаты групп и каналов (шаг 2: /setup привязывает чат к группе КСТ)
+# ==========================================================================
+
+
+def add_group_chat(conn: sqlite3.Connection, chat_id: int,
+                   chat_title: str, chat_type: str, group_name: str,
+                   added_by: int, now: str | None = None) -> None:
+    """Привязать чат к группе КСТ (повторный вызов перезаписывает).
+
+    Один ``chat_id`` — одна группа: ``/setup 25КАД`` после ``/setup 26КАД``
+    меняет привязку, а не создаёт вторую. ``notifications_enabled``
+    сбрасывается в 1: админ только что настроил чат, уведомления нужны.
+
+    Args:
+        conn: соединение SQLite.
+        chat_id: id чата/канала Telegram.
+        chat_title: название чата (может быть пустым).
+        chat_type: 'group' | 'supergroup' | 'channel'.
+        group_name: нормализованное имя группы КСТ.
+        added_by: tg_id того, кто привязал чат.
+        now: момент в ISO (для тестов); иначе берётся пояс техникума.
+    """
+    from datetime import datetime
+
+    from bot.config import TIMEZONE
+
+    added_at = now or datetime.now(TIMEZONE).isoformat(timespec="seconds")
+    with transaction(conn):
+        conn.execute(
+            "INSERT INTO group_chats"
+            " (chat_id, chat_title, chat_type, group_name, added_by,"
+            "  added_at, notifications_enabled)"
+            " VALUES (?, ?, ?, ?, ?, ?, 1)"
+            " ON CONFLICT(chat_id) DO UPDATE SET"
+            "   chat_title = excluded.chat_title,"
+            "   chat_type = excluded.chat_type,"
+            "   group_name = excluded.group_name,"
+            "   added_by = excluded.added_by,"
+            "   added_at = excluded.added_at",
+            (chat_id, chat_title or "", chat_type, group_name, added_by,
+             added_at),
+        )
+
+
+def remove_group_chat(conn: sqlite3.Connection, chat_id: int) -> bool:
+    """Отвязать чат (``/unsync`` или бота выгнали из чата).
+
+    Returns:
+        True, если запись была и её удалили.
+    """
+    with transaction(conn):
+        cursor = conn.execute(
+            "DELETE FROM group_chats WHERE chat_id = ?", (chat_id,)
+        )
+    return cursor.rowcount > 0
+
+
+def get_group_chat(conn: sqlite3.Connection, chat_id: int) -> dict | None:
+    """Привязка чата или None, если чат не настроен."""
+    row = conn.execute(
+        "SELECT * FROM group_chats WHERE chat_id = ?", (chat_id,)
+    ).fetchone()
+    return dict(row) if row is not None else None
+
+
+def get_all_group_chats(conn: sqlite3.Connection) -> list[dict]:
+    """Все привязанные чаты (для админки и диагностики)."""
+    rows = conn.execute(
+        "SELECT * FROM group_chats ORDER BY added_at, chat_id"
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def mark_group_chat_full_sent(conn: sqlite3.Connection, chat_id: int,
+                              date_iso: str) -> bool:
+    """Отметить, что в чат отправлено полное расписание на дату.
+
+    Нужно для дедупликации: рассылка ходит каждые 15 минут, а полное
+    расписание на завтра в чат должно уйти один раз за дату.
+
+    Args:
+        conn: соединение SQLite.
+        chat_id: id чата.
+        date_iso: дата (``YYYY-MM-DD``), на которую отправлено расписание.
+
+    Returns:
+        True, если запись найдена и обновлена.
+    """
+    with transaction(conn):
+        cursor = conn.execute(
+            "UPDATE group_chats SET last_full_schedule_sent_date = ?"
+            " WHERE chat_id = ?",
+            (date_iso, chat_id),
+        )
+    return cursor.rowcount > 0
+
+
+def get_group_chats_for_group(conn: sqlite3.Connection,
+                              group_name: str) -> list[dict]:
+    """Чаты группы, которым нужно отправлять уведомления о заменах.
+
+    Returns:
+        Список словарей строк ``group_chats`` только с включёнными
+        уведомлениями (``notifications_enabled = 1``).
+    """
+    rows = conn.execute(
+        "SELECT * FROM group_chats"
+        " WHERE group_name = ? AND notifications_enabled = 1"
+        " ORDER BY chat_id",
+        (group_name,),
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def get_all_notify_groups(conn: sqlite3.Connection) -> list[str]:
+    """Группы, у которых есть получатели: личные подписчики ИЛИ чаты.
+
+    Нужна рассылке замен: чат группы может быть привязан, даже если в боте
+    нет ни одного личного подписчика этой группы, и наоборот.
+
+    Returns:
+        Отсортированный список уникальных имён групп.
+    """
+    rows = conn.execute(
+        "SELECT DISTINCT group_name FROM ("
+        "  SELECT group_name FROM users"
+        "   WHERE is_active = 1 AND group_name IS NOT NULL AND group_name <> ''"
+        "  UNION"
+        "  SELECT group_name FROM group_chats"
+        "   WHERE group_name IS NOT NULL AND group_name <> ''"
+        "     AND notifications_enabled = 1"
+        ") ORDER BY group_name"
+    ).fetchall()
+    return [str(row["group_name"]) for row in rows]
