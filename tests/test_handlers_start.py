@@ -159,6 +159,67 @@ def test_suggest_groups_empty_when_nothing_close() -> None:
     assert start_h.suggest_groups("99XXX", ["26КАД", "26МЭГ"]) == []
 
 
+# --- обе группы 26КАД и 026КАД (часть 2) ---
+
+def test_suggest_groups_offers_both_kad_groups() -> None:
+    """Для «26КД» подсказка содержит ОБЕ группы: 26КАД и 026КАД.
+
+    Пользователь сам выбирает свою: это разные параллельные группы, и
+    угадывать за него нельзя.
+    """
+    available = ["26КАД", "026КАД"]
+    found = start_h.suggest_groups("26КД", available)
+
+    assert "26КАД" in found
+    assert "026КАД" in found
+
+
+@pytest.mark.parametrize("raw", ["26КД", "26КАД", "026КАД"])
+def test_suggest_groups_both_for_any_typo(raw: str) -> None:
+    """Похожий ввод показывает обе группы (в пределах лимита).
+
+    Вызывается с уже нормализованным именем — так это и делает хендлер
+    (:func:`normalize_group_name` перед :func:`suggest_groups`).
+    """
+    available = ["26КАД", "026КАД"]
+    found = start_h.suggest_groups(raw, available)
+    assert set(found) == {"26КАД", "026КАД"}
+
+
+def test_lowercase_input_is_normalized_before_fuzzy() -> None:
+    """«26кд» нормализуется в «26КД» — и тогда подсказка находит обе группы.
+
+    Хендлер регистрации нормализует ввод перед поиском, поэтому нижний
+    регистр не должен мешать: проверяем всю цепочку.
+    """
+    from bot.parsers.groups import normalize_group_name
+
+    available = ["26КАД", "026КАД"]
+    normalized = normalize_group_name("26кд")
+    assert normalized == "26КД"
+
+    found = start_h.suggest_groups(normalized, available)
+    assert set(found) == {"26КАД", "026КАД"}
+
+
+def test_available_groups_keep_both_kad(conn_with_groups) -> None:
+    """В списке доступных групп обе КАД присутствуют раздельно."""
+    available = db.list_available_groups(conn_with_groups)
+
+    assert "26КАД" in available
+    assert "026КАД" in available
+    assert "26КАД" != "026КАД"
+
+
+def test_registering_026kad_does_not_touch_26kad(conn_with_groups) -> None:
+    """Регистрация 026КАД сохраняет именно её, не подменяя на 26КАД."""
+    db.upsert_user(conn_with_groups, 7001, "026КАД", "Студент")
+    db.upsert_user(conn_with_groups, 7002, "26КАД", "Другой")
+
+    assert db.get_user_group(conn_with_groups, 7001) == "026КАД"
+    assert db.get_user_group(conn_with_groups, 7002) == "26КАД"
+
+
 # --- render_day ---
 
 def _lesson(**over: object) -> dict:

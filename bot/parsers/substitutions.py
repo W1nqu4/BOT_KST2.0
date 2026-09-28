@@ -69,6 +69,11 @@ DATE_RE = re.compile(r"на\s+(\d{1,2})\s+([А-ЯЁ]+)\s+(\d{4})", re.IGNORECASE
 # «замены нет»: строка только из длинных тире, дефисов и пробелов.
 DIVIDER_RE = re.compile(r"^[—–−\-\s]+$")
 
+# Заглушка вместо названия предмета: тире, подчёркивания, точки, многоточия.
+# В листе замен на отменённую пару в колонке «Предмет по расписанию» стоит
+# разделитель «————————————————», а не предмет.
+PLACEHOLDER_RE = re.compile(r"[-—–−_…·.\s]+")
+
 # Служебные хвосты, которые не являются ни предметом, ни фамилией.
 # «Самостоятельная работа» здесь НЕ срезается: она фиксируется флагом
 # is_self_study (см. SELF_STUDY_RE), а текст предмета остаётся полным.
@@ -127,6 +132,49 @@ EXPECTED_FIELDS = (
     "group", "date_iso", "para", "old_subject", "new_subject",
     "teacher", "room", "is_cancelled", "is_self_study",
 )
+
+
+def is_placeholder(text: str) -> bool:
+    """True, если текст — разделитель/заглушка, а не реальный предмет.
+
+    В листе замен на отменённую пару в колонке «Предмет по расписанию» стоит
+    разделитель из длинных тире (``————————————————``). Это не название
+    предмета, и показывать его пользователю нельзя — иначе в сообщении
+    появляется зачёркнутая черта.
+
+    Заглушкой считаются: пустая строка, строка из пробелов и строка, целиком
+    состоящая из тире, подчёркиваний, точек, многоточий и подобных знаков.
+
+    Args:
+        text: значение из колонки (может быть None).
+
+    Returns:
+        True — показывать нечего; False — это осмысленный текст.
+    """
+    if not text:
+        return True
+    stripped = text.strip()
+    if not stripped:
+        return True
+    return bool(PLACEHOLDER_RE.fullmatch(stripped))
+
+
+def _clean_old_subject(raw: str) -> str:
+    """Привести «Предмет по расписанию» к показываемому виду.
+
+    Разделитель-заглушка превращается в пустую строку: тогда рендер просто
+    не выводит зачёркнутую строку. Реальные названия предметов возвращаются
+    как есть (обрезка пробелов уже сделана вызывающим кодом).
+
+    Args:
+        raw: текст колонки после нормализации пробелов.
+
+    Returns:
+        Название предмета или ``""`` для заглушки.
+    """
+    if is_placeholder(raw):
+        return ""
+    return raw
 
 
 def parse_html(path: str | Path) -> list[dict]:
@@ -249,8 +297,8 @@ def _parse_rows(table: Tag, columns: dict[str, int],
         if para is None:
             continue  # служебная строка без номера пары
 
-        old_subject = _normalize_space(
-            _cell_text(cells[columns["old"]]).replace("\n", " "))
+        old_subject = _clean_old_subject(
+            _normalize_space(_cell_text(cells[columns["old"]]).replace("\n", " ")))
         new_raw = _cell_text(cells[columns["new"]])
         room_raw = (_cell_text(cells[columns["room"]])
                     if "room" in columns and len(cells) > columns["room"]

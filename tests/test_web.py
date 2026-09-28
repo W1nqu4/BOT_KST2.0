@@ -60,7 +60,7 @@ async def test_health_ok(client) -> None:
     for key in ("schema_version", "users_count", "last_schedule_update",
                 "lessons_cached", "checked_at"):
         assert key in payload, f"нет ключа {key}"
-    assert payload["schema_version"] == 8
+    assert payload["schema_version"] == 9
     assert payload["users_count"] == 1
     assert payload["lessons_cached"] > 1000
 
@@ -86,6 +86,23 @@ async def test_health_reports_substitution_history(client, conn,
     payload = await (await client.get("/health")).json()
     assert payload["substitution_history_rows"] == 1
     assert payload["substitution_history_earliest"] == "2026-09-28"
+
+
+async def test_health_reports_groups_with_schedule(client,
+                                                   parsed_schedule) -> None:
+    """Диагностика: /health отдаёт список групп из расписания.
+
+    Нужна, чтобы видеть, что обе параллельные группы (26КАД и 026КАД) на
+    месте и не склеились в одну.
+    """
+    payload = await (await client.get("/health")).json()
+
+    assert "groups_with_schedule" in payload
+    groups = payload["groups_with_schedule"]
+    assert isinstance(groups, list)
+    assert groups, "в БД есть группы расписания"
+    assert len(groups) == len(set(groups)), "группы должны быть уникальны"
+    assert groups == sorted(groups), "список отсортирован"
 
 
 async def test_health_content_type_json(client) -> None:

@@ -60,6 +60,7 @@ async def handle_health(request: web.Request) -> web.Response:
         lessons = conn.execute(
             "SELECT COUNT(*) FROM schedule_cache"
         ).fetchone()[0]
+        groups_with_schedule = db.list_available_groups(conn)
         history_rows = db.count_substitution_history(conn)
         history_earliest = db.earliest_substitution_history_date(conn)
     except Exception as exc:
@@ -79,6 +80,7 @@ async def handle_health(request: web.Request) -> web.Response:
         "last_schedule_update": last_update,
         "last_substitutions_update": last_subs,
         "lessons_cached": int(lessons),
+        "groups_with_schedule": groups_with_schedule,
         "substitution_history_rows": int(history_rows),
         "substitution_history_earliest": history_earliest,
         "public_base_url": public_base_url,

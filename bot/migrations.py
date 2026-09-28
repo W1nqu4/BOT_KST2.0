@@ -315,6 +315,28 @@ def migrate_8_substitution_history(conn: sqlite3.Connection) -> None:
     )
 
 
+def migrate_9_group_chat_pin(conn: sqlite3.Connection) -> None:
+    """Миграция 8 → 9: закрепление расписания в чате.
+
+    Бот закрепляет сообщение с расписанием на сегодня, а после последней
+    пары — открепляет (см. :mod:`bot.services.pin_service`). Чтобы знать,
+    что откреплять, храним id закреплённого сообщения и дату, на которую
+    оно закреплено.
+
+    Обе колонки NULL-able: NULL означает «ничего не закреплено» — это же
+    состояние у всех существующих чатов после обновления.
+
+    ``pinned_date_iso`` нужен, чтобы отличить «закреплено на сегодня» от
+    «закреплено на прошлую дату» (второе надо снять в любом случае).
+    """
+    conn.execute(
+        "ALTER TABLE group_chats ADD COLUMN pinned_message_id INTEGER"
+    )
+    conn.execute(
+        "ALTER TABLE group_chats ADD COLUMN pinned_date_iso TEXT"
+    )
+
+
 MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     1: migrate_1_initial,
     2: migrate_2_add_self_study,
@@ -324,6 +346,7 @@ MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     6: migrate_6_group_chats,
     7: migrate_7_group_chat_full_schedule,
     8: migrate_8_substitution_history,
+    9: migrate_9_group_chat_pin,
 }
 
 

@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from bot.parsers.groups import normalize_group_name
+from bot.parsers import substitutions as subs
 from bot.parsers.substitutions import (
     EXPECTED_FIELDS,
     parse_html,
@@ -337,3 +338,77 @@ def test_unknown_month_returns_empty(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     assert parse_html(path) == []
+# --- is_placeholder: заглушки вместо предмета (часть 1) ---
+
+@pytest.mark.parametrize("raw", [
+    "————————————————",   # разделитель из листа замен
+    "",
+    "   ",
+    "---   ---",
+    "___",
+    "…",
+    "—",
+    "–",                  # короткое тире
+    "−",                  # минус
+    "· · ·",
+    "...",
+    "\t",
+    "  — —— – ",
+])
+def test_is_placeholder_true(raw: str) -> None:
+    """Разделители и пустые строки — заглушки."""
+    assert subs.is_placeholder(raw) is True
+
+
+@pytest.mark.parametrize("raw", [
+    "ОД.03 История",
+    "ОД.07 Математика",
+    "  ОД.04 Обществознание  ",
+    "Физика — практикум",      # тире внутри текста не делает его заглушкой
+    "ОД.06 Иностранный язык",
+    "2",
+])
+def test_is_placeholder_false(raw: str) -> None:
+    """Реальные названия предметов заглушками не считаются."""
+    assert subs.is_placeholder(raw) is False
+
+
+def test_is_placeholder_none() -> None:
+    """None (пустая колонка) — заглушка."""
+    assert subs.is_placeholder(None) is True
+
+
+def test_clean_old_subject_removes_divider() -> None:
+    """Разделитель превращается в пустую строку, предмет остаётся."""
+    assert subs._clean_old_subject("————————————————") == ""
+    assert subs._clean_old_subject("   ") == ""
+    assert subs._clean_old_subject("ОД.03 История") == "ОД.03 История"
+
+
+def test_parsed_rows_have_no_placeholders(rows: list[dict]) -> None:
+    """В разобранном листе заглушки в old_subject заменены на пустую строку."""
+    assert rows, "лист замен должен разобраться"
+    for row in rows:
+        old = row["old_subject"]
+        # Пустая строка — правильный результат (заглушка отброшена).
+        # Любой непустой текст должен быть настоящим предметом.
+        if old:
+            assert not subs.is_placeholder(old), \
+                f"в old_subject осталась заглушка: {old!r}"
+        for char in "—–−_…":
+            assert char not in old, \
+                f"в old_subject остался символ-разделитель {char!r}: {old!r}"
+
+    # И при этом настоящие предметы не потерялись.
+    assert any(row["old_subject"] for row in rows), \
+        "реальные предметы должны остаться"
+
+
+def test_parsed_groups_keep_leading_zero(rows: list[dict]) -> None:
+    """Группы из листа сохраняются как есть, ведущий ноль не срезается."""
+    groups = {row["group"] for row in rows}
+    # В листе замен 2026 года есть 026КАД — она должна остаться с нулём.
+    zero_groups = {g for g in groups if g.startswith("0")}
+    assert zero_groups, "в листе есть группы с ведущим нулём"
+    assert all(g == normalize_group_name(g) for g in groups), \
+        "имена групп должны быть уже нормализованы и не терять ноль"

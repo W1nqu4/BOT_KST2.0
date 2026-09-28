@@ -163,6 +163,24 @@ async def is_chat_admin(bot, chat_id: int, user_id: int) -> bool:
 
 async def bot_is_channel_admin(bot, chat_id: int) -> bool:
     """Админ ли сам бот в канале (иначе команды не читаются)."""
+    return await bot_is_chat_admin(bot, chat_id)
+
+
+async def bot_is_chat_admin(bot, chat_id: int) -> bool:
+    """Админ ли сам бот в чате (нужно для закрепления расписания, шаг 4).
+
+    Проверяем и в канале, и в группе: закрепить сообщение Telegram разрешает
+    только администратору с правом «Закрепление сообщений». Статус спрашиваем
+    у Telegram (``get_chat_member`` для самого бота), при ошибке считаем, что
+    прав нет — так мы не обещаем пользователю закрепление, которого не будет.
+
+    Args:
+        bot: объект Bot.
+        chat_id: id чата.
+
+    Returns:
+        True для статусов administrator/creator, иначе False.
+    """
     try:
         me = await bot.get_me()
         member = await bot.get_chat_member(chat_id, me.id)
@@ -170,8 +188,7 @@ async def bot_is_channel_admin(bot, chat_id: int) -> bool:
         logger.warning("could not check bot membership",
                        extra={"chat_id": chat_id, "error": repr(exc)})
         return False
-    status = _status_value(member)
-    return status in ADMIN_STATUSES
+    return _status_value(member) in ADMIN_STATUSES
 
 
 def _parse_group_argument(raw: str | None) -> str | None:
@@ -323,12 +340,26 @@ async def cmd_setup(message: Message, command: CommandObject, conn, bot) -> None
     )
     logger.info("chat linked to group",
                 extra={"chat_id": chat.id, "group": group, "by": user_id})
-    await message.answer(
-        f"✅ Чат привязан к группе <b>{escape(group)}</b>.\n"
-        "Новые замены будут приходить сюда автоматически.\n\n"
-        "<i>Отключить — /unsync. Расписание на сегодня — /schedule.</i>",
-        parse_mode="HTML",
-    )
+
+    # Шаг 4: закрепление расписания требует права «Закрепление сообщений».
+    # Привязка работает и без него, но пользователю говорим прямо, иначе он
+    # будет ждать закреплённого расписания и не понимать, почему его нет.
+    if await bot_is_chat_admin(bot, chat.id):
+        await message.answer(
+            f"✅ Чат привязан к группе <b>{escape(group)}</b>.\n"
+            "🔔 Замены и расписание будут приходить сюда, "
+            "закреплю до конца пар.\n\n"
+            "<i>Отключить — /unsync. Расписание на сегодня — /schedule.</i>",
+            parse_mode="HTML",
+        )
+    else:
+        await message.answer(
+            "⚠️ <b>Сделайте меня администратором</b> группы с правом "
+            "«Закрепление сообщений», иначе не смогу закреплять "
+            "расписание. Замены будут приходить, но без закрепления.\n\n"
+            f"✅ Чат привязан к группе <b>{escape(group)}</b>.",
+            parse_mode="HTML",
+        )
 # --- /unsync ---
 
 @router.message(Command("unsync"))

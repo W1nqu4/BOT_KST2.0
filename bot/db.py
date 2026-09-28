@@ -596,6 +596,52 @@ def earliest_substitution_history_date(conn: sqlite3.Connection) -> str | None:
     return str(value) if value else None
 
 
+# ==========================================================================
+# Закрепление расписания в чате (шаг 4)
+# ==========================================================================
+
+
+def set_pinned_message(conn: sqlite3.Connection, chat_id: int,
+                       message_id: int, date_iso: str) -> bool:
+    """Запомнить, какое сообщение закреплено в чате и на какую дату.
+
+    Returns:
+        True, если запись чата найдена и обновлена.
+    """
+    with transaction(conn):
+        cursor = conn.execute(
+            "UPDATE group_chats SET pinned_message_id = ?, pinned_date_iso = ?"
+            " WHERE chat_id = ?",
+            (message_id, date_iso, chat_id),
+        )
+    return cursor.rowcount > 0
+
+
+def get_pinned_message(conn: sqlite3.Connection, chat_id: int) -> dict | None:
+    """Закреплённое сообщение чата или None, если ничего не закреплено."""
+    row = conn.execute(
+        "SELECT pinned_message_id, pinned_date_iso FROM group_chats"
+        " WHERE chat_id = ? AND pinned_message_id IS NOT NULL",
+        (chat_id,),
+    ).fetchone()
+    return dict(row) if row is not None else None
+
+
+def clear_pinned_message(conn: sqlite3.Connection, chat_id: int) -> bool:
+    """Снять отметку о закреплении (после открепления или ошибки).
+
+    Returns:
+        True, если запись чата найдена и обновлена.
+    """
+    with transaction(conn):
+        cursor = conn.execute(
+            "UPDATE group_chats SET pinned_message_id = NULL,"
+            " pinned_date_iso = NULL WHERE chat_id = ?",
+            (chat_id,),
+        )
+    return cursor.rowcount > 0
+
+
 def get_all_notify_groups(conn: sqlite3.Connection) -> list[str]:
     """Группы, у которых есть получатели: личные подписчики ИЛИ чаты.
 

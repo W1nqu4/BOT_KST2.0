@@ -16,7 +16,11 @@ import logging
 from datetime import date, datetime, time, timedelta
 from html import escape
 
-from aiogram.exceptions import TelegramForbiddenError, TelegramRetryAfter
+from aiogram.exceptions import (
+    TelegramBadRequest,
+    TelegramForbiddenError,
+    TelegramRetryAfter,
+)
 
 from bot import db
 from bot.config import (
@@ -54,6 +58,10 @@ NOTIFY_INTERVAL = 15 * 60
 
 # Предел сообщения Telegram; разбиваем по границам карточек.
 MESSAGE_LIMIT = 4096
+
+# Маркер «пар нет»: по нему понимаем, что закреплять нечего (шаг 4).
+# Закреплённое пустое расписание только мешало бы.
+EMPTY_DAY_MARKER = "На завтра пар нет"
 
 # Иконки — те же, что в расписании (единый язык с шагом 7).
 ICON_SUBSTITUTION = "🔁"
@@ -274,6 +282,28 @@ def substitution_icon(sub: dict) -> str:
     return ICON_SUBSTITUTION
 
 
+def _clean_subject(text: str) -> str:
+    """Экранировать предмет, отбросив разделитель-заглушку.
+
+    В листе замен на отменённую пару в колонке «Предмет по расписанию» стоит
+    разделитель из длинных тире. Раньше он попадал в ``old_subject`` и
+    выводился как ``<s>————————————————</s>``. Парсер теперь его вычищает
+    (:func:`bot.parsers.substitutions.is_placeholder`), но в БД могли
+    остаться старые строки — поэтому проверяем и здесь.
+
+    Args:
+        text: значение ``old_subject`` из словаря замены.
+
+    Returns:
+        Экранированный HTML предмет или ``""``, если показывать нечего.
+    """
+    from bot.parsers.substitutions import is_placeholder
+
+    if is_placeholder(text):
+        return ""
+    return escape(text)
+
+
 def _sub_date(sub: dict, target: date | None = None) -> date | None:
     """Дата замены: явный target или ``date_iso`` из словаря.
 
@@ -307,7 +337,10 @@ def render_substitution_card(sub: dict,
         HTML-текст карточки (без завершающих переводов строк).
     """
     para = int(sub.get("para") or 0)
-    old_subject = escape(str(sub.get("old_subject") or ""))
+    # Защита для уже сохранённых данных: в БД могли лежать разделители-
+    # заглушки вместо предмета (парсер начал их чистить позже, а старые
+    # строки не перепарсиваются). Показывать «зачёркнутую черту» нельзя.
+    old_subject = _clean_subject(str(sub.get("old_subject") or ""))
     new_subject = escape(str(sub.get("new_subject") or ""))
     teacher = escape(str(sub.get("teacher") or ""))
     room = escape(str(sub.get("room") or ""))
@@ -500,8 +533,74 @@ def build_full_schedule_for_chat(conn, group: str, target: date,
     return split_blocks(header, blocks, footer)
 
 
-async def _send_to_chat(conn, bot, chat_id: int, texts: list[str]) -> bool:
-    """Отправить сообщения в групповой чат/канал.
+async def unpin_previous(bot, conn, chat_id: int) -> None:
+    """Снять прежнее закрепление перед отправкой нового расписания.
+
+    Ошибку Telegram игнорируем: закрепление могли снять вручную, и тогда
+    ``unpinChatMessage`` вернёт ошибку — это норма. Отметку в БД снимаем
+    в любом случае, чтобы не пытаться открепить её повторно.
+
+    Args:
+        bot: объект Bot.
+        conn: соединение SQLite.
+        chat_id: чат.
+    """
+    pinned = db.get_pinned_message(conn, chat_id)
+    if not pinned:
+        return
+    old_id = int(pinned["pinned_message_id"])
+    try:
+        await bot.unpin_chat_message(chat_id, message_id=old_id)
+        logger.info("previous pinned message unpinned",
+                    extra={"chat_id": chat_id, "message_id": old_id})
+    except Exception:
+        logger.warning("old unpin failed",
+                       extra={"chat_id": chat_id, "message_id": old_id})
+    finally:
+        db.clear_pinned_message(conn, chat_id)
+
+
+async def pin_schedule_message(bot, conn, chat_id: int, message_id: int,
+                               date_iso: str) -> bool:
+    """Закрепить сообщение с расписанием (тихо, без уведомления).
+
+    Если у бота нет прав «Закрепление сообщений», Telegram вернёт
+    ``TelegramBadRequest``: привязка чата остаётся, закрепления просто не
+    будет — это допустимый режим (см. предупреждение в ``/setup``).
+
+    Args:
+        bot: объект Bot.
+        conn: соединение SQLite.
+        chat_id: чат.
+        message_id: id сообщения с расписанием.
+        date_iso: дата, на которую закреплено расписание.
+
+    Returns:
+        True, если закрепление удалось.
+    """
+    try:
+        await bot.pin_chat_message(chat_id=chat_id, message_id=message_id,
+                                   disable_notification=True)
+    except TelegramBadRequest as exc:
+        # Бот не админ или нет права «Закрепление сообщений».
+        logger.warning("pin failed, bot lacks rights",
+                       extra={"chat_id": chat_id, "error": str(exc)})
+        return False
+    except Exception as exc:
+        logger.warning("pin failed",
+                       extra={"chat_id": chat_id, "error": repr(exc)})
+        return False
+
+    db.set_pinned_message(conn, chat_id, message_id, date_iso=date_iso)
+    logger.info("schedule pinned", extra={"chat_id": chat_id,
+                                          "message_id": message_id,
+                                          "date": date_iso})
+    return True
+
+
+async def _send_to_chat(conn, bot, chat_id: int, texts: list[str],
+                        date_iso: str = "") -> bool:
+    """Отправить сообщения в групповой чат/канал и закрепить расписание.
 
     Обрабатывает те же ожидаемые ошибки Telegram, что и личная отправка:
 
@@ -510,21 +609,42 @@ async def _send_to_chat(conn, bot, chat_id: int, texts: list[str]) -> bool:
       каждый проход;
     - ``TelegramRetryAfter`` — флуд-контроль: ждём и делаем одну попытку.
 
+    Закрепление (шаг 4): перед отправкой снимаем прежнее закрепление, после
+    отправки закрепляем ПЕРВОЕ сообщение расписания. Если пар на день нет —
+    не закрепляем: висящее пустое расписание только мешало бы.
+    Закреплять можно только в чатах (в личке Telegram не даст).
+
     Args:
         conn: соединение SQLite.
         bot: объект Bot.
         chat_id: получатель (чат/канал).
         texts: список сообщений.
+        date_iso: дата расписания (пустая строка — не закреплять).
 
     Returns:
         True, если все сообщения ушли.
     """
-    async def _deliver() -> None:
+    async def _deliver() -> int | None:
+        """Отправить все сообщения; вернуть id первого."""
+        first_id: int | None = None
         for text in texts:
-            await bot.send_message(chat_id, text, parse_mode="HTML")
+            sent = await bot.send_message(chat_id, text, parse_mode="HTML")
+            if first_id is None:
+                first_id = getattr(sent, "message_id", None)
+        return first_id
+
+    async def _after_send(first_id: int | None) -> None:
+        """Закрепить расписание, если это имеет смысл."""
+        if not date_iso or first_id is None:
+            return
+        if not texts or EMPTY_DAY_MARKER in texts[0]:
+            return      # пар нет — закреплять нечего
+        await pin_schedule_message(bot, conn, chat_id, int(first_id), date_iso)
 
     try:
-        await _deliver()
+        await unpin_previous(bot, conn, chat_id)
+        first_id = await _deliver()
+        await _after_send(first_id)
         return True
     except TelegramForbiddenError:
         db.remove_group_chat(conn, chat_id)
@@ -537,7 +657,8 @@ async def _send_to_chat(conn, bot, chat_id: int, texts: list[str]) -> bool:
                        extra={"chat_id": chat_id, "retry_after": pause})
         await asyncio.sleep(pause)
         try:
-            await _deliver()
+            first_id = await _deliver()
+            await _after_send(first_id)
             return True
         except TelegramForbiddenError:
             db.remove_group_chat(conn, chat_id)
@@ -627,7 +748,8 @@ async def _process_substitutions(conn, bot, target: date,
                     conn, group, target, True
                 )
                 async with semaphore:
-                    if await _send_to_chat(conn, bot, chat_id, chat_texts):
+                    if await _send_to_chat(conn, bot, chat_id, chat_texts,
+                                           date_iso=date_iso):
                         sent += 1
                         db.mark_group_chat_full_sent(conn, chat_id, date_iso)
                     if throttle and NOTIFY_SEND_DELAY_SECONDS:

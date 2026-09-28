@@ -535,7 +535,10 @@ async def test_process_sends_to_two_users_and_chat(conn_with_users) -> None:
                                            throttle=False)
 
     assert sent == 3, "двое личных + один чат"
-    recipients = [m.get("chat_id") for m in bot.sent]
+    # Отбираем только отправки сообщений: в ``sent`` попадают и вызовы
+    # закрепления (PinChatMessage), у которых нет текста.
+    recipients = [m.get("chat_id") for m in bot.sent
+                  if m["method"] == "SendMessage"]
     assert sorted(recipients) == sorted([USER_ID, 556, -100500])
 
 
@@ -894,3 +897,211 @@ async def test_loop_survives_errors(conn_with_users, monkeypatch) -> None:
 
     assert len(calls) == 2, "после ошибки цикл должен сделать ещё проход"
     assert len(calls) == 2
+# --- закрепление расписания в чате (шаг 4) ---
+
+class PinBot(FakeBot):
+    """FakeBot, который помнит вызовы pin/unpin и умеет «ошибаться»."""
+
+    def __init__(self, fail_pin: bool = False) -> None:
+        super().__init__()
+        self.pinned: list[dict] = []
+        self.unpinned: list[dict] = []
+        self.fail_pin = fail_pin
+
+    async def __call__(self, method, request_timeout=None):
+        name = type(method).__name__
+        if name == "PinChatMessage":
+            if self.fail_pin:
+                from aiogram.exceptions import TelegramBadRequest
+
+                raise TelegramBadRequest(method=method,
+                                         message="not enough rights")
+            self.pinned.append({
+                "chat_id": getattr(method, "chat_id", None),
+                "message_id": getattr(method, "message_id", None),
+                "disable_notification": getattr(
+                    method, "disable_notification", None
+                ),
+            })
+        if name == "UnpinChatMessage":
+            self.unpinned.append({
+                "chat_id": getattr(method, "chat_id", None),
+                "message_id": getattr(method, "message_id", None),
+            })
+        return await super().__call__(method, request_timeout)
+
+
+async def test_chat_schedule_is_pinned_silently(conn_chat) -> None:
+    """Отправка расписания в чат → pin вызван тихо (disable_notification)."""
+    _drop_personal_users(conn_chat)
+    _seed(conn_chat, [SUB_FULL])
+    db.add_group_chat(conn_chat, -100500, "КСТ", "supergroup",
+                      "26КАД", USER_ID)
+    bot = PinBot()
+
+    await ns._process_substitutions(conn_chat, bot, TARGET, throttle=False)
+
+    assert len(bot.pinned) == 1
+    pin = bot.pinned[0]
+    assert pin["chat_id"] == -100500
+    assert pin["disable_notification"] is True, "участников не уведомляем"
+    pinned = db.get_pinned_message(conn_chat, -100500)
+    assert pinned is not None
+    assert pinned["pinned_date_iso"] == TARGET.isoformat()
+    assert pinned["pinned_message_id"] == pin["message_id"]
+
+
+async def test_old_pin_removed_before_new(conn_chat) -> None:
+    """Перед новым закреплением снимается старое."""
+    _drop_personal_users(conn_chat)
+    _seed(conn_chat, [SUB_FULL])
+    db.add_group_chat(conn_chat, -100500, "КСТ", "supergroup",
+                      "26КАД", USER_ID)
+    db.set_pinned_message(conn_chat, -100500, 4242, "2026-09-27")
+    bot = PinBot()
+
+    await ns._process_substitutions(conn_chat, bot, TARGET, throttle=False)
+
+    assert bot.unpinned == [{"chat_id": -100500, "message_id": 4242}]
+    assert len(bot.pinned) == 1
+    pinned = db.get_pinned_message(conn_chat, -100500)
+    assert pinned["pinned_message_id"] == bot.pinned[0]["message_id"]
+
+
+async def test_pin_failure_keeps_chat_link(conn_chat, caplog) -> None:
+    """pinChatMessage вернул TelegramBadRequest → привязка осталась, WARNING."""
+    import logging as _logging
+
+    _drop_personal_users(conn_chat)
+    _seed(conn_chat, [SUB_FULL])
+    db.add_group_chat(conn_chat, -100500, "КСТ", "supergroup",
+                      "26КАД", USER_ID)
+    bot = PinBot(fail_pin=True)
+
+    with caplog.at_level(_logging.WARNING):
+        sent = await ns._process_substitutions(conn_chat, bot, TARGET,
+                                               throttle=False)
+
+    assert sent == 1, "сообщение всё равно ушло"
+    assert bot.pinned == []
+    assert db.get_group_chat(conn_chat, -100500) is not None, \
+        "привязка чата должна остаться"
+    assert db.get_pinned_message(conn_chat, -100500) is None
+    assert any("pin failed" in r.message for r in caplog.records), \
+        "должно быть предупреждение в логе"
+
+
+async def test_empty_day_is_not_pinned(conn_chat) -> None:
+    """Пар нет → расписание не закрепляем (висящее пустое только мешает).
+
+    Проверяем на прямом вызове: когда замена есть, она сама добавляется в
+    расписание отдельной строкой (:func:`apply_substitutions`), поэтому
+    «пустой день» получается только без замен на него — например, когда
+    триггером рассылки была замена на другую дату.
+    """
+    from bot.services.notify_service import build_full_schedule_for_chat
+
+    _drop_personal_users(conn_chat)
+    db.add_group_chat(conn_chat, -100500, "КСТ", "supergroup",
+                      "26КАД", USER_ID)
+    bot = PinBot()
+
+    # Готовим текст «пар нет» на воскресенье и шлём его как расписание.
+    empty_day = date(2026, 9, 27)
+    texts = build_full_schedule_for_chat(conn_chat, "26КАД", empty_day, True)
+    assert "На завтра пар нет" in texts[0]
+
+    await ns._send_to_chat(conn_chat, bot, -100500, texts,
+                           date_iso=empty_day.isoformat())
+
+    assert bot.pinned == [], "пустой день закреплять нельзя"
+    assert db.get_pinned_message(conn_chat, -100500) is None
+
+
+# --- разделители в old_subject (часть 1) ---
+
+def test_card_without_planned_lesson_has_no_strike() -> None:
+    """Замена без плановой пары: строки «<s>...</s>» быть не должно."""
+    sub = dict(SUB_FULL, old_subject="", new_subject="",
+               teacher="", room="", para=1, is_cancelled=True)
+    body = ns.render_substitution_card(sub, TARGET)
+
+    assert "<s>" not in body, "зачёркнутой строки быть не должно"
+    assert "————————————————" not in body
+    assert "❌ <b>1 пара</b>" in body
+    assert "<i>Пара отменена</i>" in body
+
+
+def test_card_with_divider_placeholder_is_cleaned() -> None:
+    """Разделитель в old_subject не показывается (старые данные в БД)."""
+    sub = dict(SUB_FULL, old_subject="————————————————", new_subject="",
+               is_cancelled=True)
+    body = ns.render_substitution_card(sub, TARGET)
+
+    assert "<s>" not in body
+    assert "—" not in body, "разделитель не должен попасть в сообщение"
+
+
+def test_card_with_planned_lesson_keeps_strike() -> None:
+    """Замена с плановой парой: строка «<s>старый предмет</s>» остаётся."""
+    sub = dict(SUB_FULL, old_subject="ОД.03 История",
+               new_subject="ОД.07 Математика")
+    body = ns.render_substitution_card(sub, TARGET)
+
+    assert "<s>ОД.03 История</s>" in body
+    assert "<b>ОД.07 Математика</b>" in body
+
+
+def test_clean_subject_helper() -> None:
+    """Хелпер рендера: заглушка → пустая строка, предмет экранируется."""
+    assert ns._clean_subject("————————————————") == ""
+    assert ns._clean_subject("") == ""
+    assert ns._clean_subject("ОД.03 История") == "ОД.03 История"
+    assert ns._clean_subject("<b>злой</b>") == "&lt;b&gt;злой&lt;/b&gt;"
+    assert ns._clean_subject("—") == ""
+
+
+async def test_group_chat_message_has_no_divider(conn_chat) -> None:
+    """В сообщении для чата тоже нет разделителя (общий рендер карточки)."""
+    _drop_personal_users(conn_chat)
+    cancelled = dict(SUB_FULL, para=1, old_subject="————————————————",
+                     new_subject="", teacher="", room="", is_cancelled=True)
+    _seed(conn_chat, [cancelled])
+    db.add_group_chat(conn_chat, -100500, "КСТ", "supergroup",
+                      "26КАД", USER_ID)
+    bot = FakeBot()
+
+    await ns._process_substitutions(conn_chat, bot, TARGET, throttle=False)
+
+    body = bot.sent[0]["text"]
+    assert "<s>" not in body
+    assert "————————————————" not in body
+
+
+async def test_unpin_previous_ignores_errors(conn_chat) -> None:
+    """Ошибка unpin не мешает: отметка в БД снимается."""
+    db.add_group_chat(conn_chat, -100500, "КСТ", "supergroup",
+                      "26КАД", USER_ID)
+    db.set_pinned_message(conn_chat, -100500, 999, "2026-09-27")
+
+    class FailingUnpin(FakeBot):
+        async def __call__(self, method, request_timeout=None):
+            if type(method).__name__ == "UnpinChatMessage":
+                raise RuntimeError("message is not pinned")
+            return await super().__call__(method, request_timeout)
+
+    await ns.unpin_previous(FailingUnpin(), conn_chat, -100500)
+
+    assert db.get_pinned_message(conn_chat, -100500) is None
+
+
+async def test_no_pin_without_date(conn_chat) -> None:
+    """Без даты (date_iso="") закрепления нет — у /schedule он не нужен."""
+    db.add_group_chat(conn_chat, -100500, "КСТ", "supergroup",
+                      "26КАД", USER_ID)
+    bot = PinBot()
+
+    await ns._send_to_chat(conn_chat, bot, -100500, ["текст расписания"])
+
+    assert bot.pinned == []
+    assert len(bot.sent) == 1

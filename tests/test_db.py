@@ -308,6 +308,29 @@ def test_history_count_and_earliest(conn: sqlite3.Connection) -> None:
     assert db.earliest_substitution_history_date(conn) == "2026-09-28"
 
 
+def test_pinned_message_helpers(conn: sqlite3.Connection) -> None:
+    """set/get/clear отметки о закреплении расписания (шаг 4)."""
+    from bot import db
+
+    apply_migrations(conn)
+    _add_user_row(conn, 111, "26КАД")
+    db.add_group_chat(conn, -100500, "КСТ", "supergroup", "26КАД", 1)
+
+    assert db.get_pinned_message(conn, -100500) is None
+
+    assert db.set_pinned_message(conn, -100500, 555, "2026-09-28") is True
+    pinned = db.get_pinned_message(conn, -100500)
+    assert pinned["pinned_message_id"] == 555
+    assert pinned["pinned_date_iso"] == "2026-09-28"
+
+    assert db.clear_pinned_message(conn, -100500) is True
+    assert db.get_pinned_message(conn, -100500) is None
+
+    # Неизвестный чат — False, без исключения.
+    assert db.set_pinned_message(conn, 424242, 1, "2026-09-28") is False
+    assert db.clear_pinned_message(conn, 424242) is False
+
+
 def test_insert_and_read_user(conn: sqlite3.Connection) -> None:
     apply_migrations(conn)
     _insert_user(conn)

@@ -24,6 +24,7 @@ from tests.test_handlers_dispatch import FakeBot
 GROUP = "26КАД"
 ADMIN_ID = 5001
 CHAT_ID = -1001234567890
+CHAT_ID_2 = -1001234567891   # второй чат (для тестов двух групп КАД)
 CHANNEL_ID = -1009876543210
 
 
@@ -172,6 +173,7 @@ def _all_text(bot: FakeBot) -> str:
 def _admin_bot(**kwargs) -> GroupBot:
     """Бот, у которого автор — админ, а сам бот — админ чата."""
     statuses = {(CHAT_ID, ADMIN_ID): ChatMemberStatus.CREATOR,
+                (CHAT_ID_2, ADMIN_ID): ChatMemberStatus.CREATOR,
                 (CHANNEL_ID, ADMIN_ID): ChatMemberStatus.CREATOR}
     statuses.update(kwargs.pop("statuses", {}))
     return GroupBot(statuses=statuses, **kwargs)
@@ -238,6 +240,45 @@ async def test_setup_from_admin_links_chat(dp, conn_with_groups) -> None:
     body = _all_text(bot)
     assert "Чат привязан к группе" in body
     assert GROUP in body
+
+
+async def test_setup_admin_bot_mentions_pinning(dp, conn_with_groups) -> None:
+    """/setup: бот админ → обещает закреплять расписание."""
+    bot = _admin_bot()
+    await dp.feed_update(bot, _update("/setup 26КАД"))
+
+    body = _all_text(bot)
+    assert "Чат привязан к группе" in body
+    assert "закреплю до конца пар" in body
+    assert "Сделайте меня администратором" not in body
+
+
+async def test_setup_non_admin_bot_warns_about_pinning(
+        dp, conn_with_groups) -> None:
+    """/setup: бот НЕ админ → предупреждение о правах, но привязка есть."""
+    bot = GroupBot(statuses={(CHAT_ID, ADMIN_ID): ChatMemberStatus.CREATOR},
+                   bot_status=ChatMemberStatus.MEMBER)
+    await dp.feed_update(bot, _update("/setup 26КАД"))
+
+    body = _all_text(bot)
+    assert "Сделайте меня администратором" in body
+    assert "Закрепление сообщений" in body
+    # Привязка всё равно выполнена — это разрешённый режим.
+    link = db.get_group_chat(conn_with_groups, CHAT_ID)
+    assert link is not None and link["group_name"] == GROUP
+
+
+async def test_setup_channel_non_admin_bot_warns(dp,
+                                                 conn_with_groups) -> None:
+    """Канал без прав: сначала просим админку (канал без прав не читается)."""
+    bot = GroupBot(statuses={(CHANNEL_ID, ADMIN_ID): ChatMemberStatus.CREATOR},
+                   bot_status=ChatMemberStatus.MEMBER)
+    await dp.feed_update(bot, _update(
+        "/setup 26КАД", chat_id=CHANNEL_ID, chat_type=ChatType.CHANNEL,
+    ))
+
+    assert "администратором канала" in _all_text(bot)
+    assert db.get_group_chat(conn_with_groups, CHANNEL_ID) is None
 
 
 async def test_setup_normalizes_group_input(dp, conn_with_groups) -> None:
@@ -481,3 +522,59 @@ def test_help_mentions_schedule_command() -> None:
     assert "/schedule" in HELP_TEXT
     assert "/setup" in HELP_TEXT
     assert "/unsync" in HELP_TEXT
+# --- обе группы 26КАД и 026КАД (часть 2) ---
+
+async def test_setup_accepts_both_kad_groups(dp, conn_with_groups) -> None:
+    """/setup принимает и 26КАД, и 026КАД — независимые привязки."""
+    bot = _admin_bot()
+    await dp.feed_update(bot, _update("/setup 26КАД", chat_id=CHAT_ID))
+    gc.reset_setup_rate_limit(CHAT_ID_2)     # лимит считается на chat_id
+    await dp.feed_update(bot, _update("/setup 026КАД", chat_id=CHAT_ID_2))
+
+    link_a = db.get_group_chat(conn_with_groups, CHAT_ID)
+    link_b = db.get_group_chat(conn_with_groups, CHAT_ID_2)
+    assert link_a["group_name"] == "26КАД"
+    assert link_b["group_name"] == "026КАД"
+    assert link_a["group_name"] != link_b["group_name"]
+
+
+async def test_setup_026kad_not_trimmed_to_26kad(dp, conn_with_groups) -> None:
+    """Ведущий ноль не срезается при /setup."""
+    bot = _admin_bot()
+    await dp.feed_update(bot, _update("/setup 026КАД"))
+
+    link = db.get_group_chat(conn_with_groups, CHAT_ID)
+    assert link["group_name"] == "026КАД", "ноль должен сохраниться"
+
+
+async def test_chat_of_26kad_gets_only_its_substitutions(
+        dp, conn_with_groups) -> None:
+    """Чат 26КАД не получает замены, адресованные 026КАД."""
+    import asyncio as _asyncio
+
+    from bot.services import cache_service
+    from bot.services import notify_service as ns_mod
+
+    db.add_group_chat(conn_with_groups, CHAT_ID, "КСТ 26КАД", "supergroup",
+                      "26КАД", ADMIN_ID)
+    db.add_group_chat(conn_with_groups, CHAT_ID_2, "КСТ 026КАД", "supergroup",
+                      "026КАД", ADMIN_ID)
+
+    # Замена только для 026КАД.
+    cache_service.save_substitutions(conn_with_groups, [{
+        "group": "026КАД", "date_iso": "2026-09-29", "para": 2,
+        "old_subject": "ОД.03 История", "new_subject": "ОД.07 Математика",
+        "teacher": "Т", "room": "307А",
+        "is_cancelled": False, "is_self_study": False,
+    }])
+
+    bot = _admin_bot()
+    await _asyncio.ensure_future(ns_mod._process_substitutions(
+        conn_with_groups, bot, date(2026, 9, 29), throttle=False
+    ))
+
+    chat_ids = [m["chat_id"] for m in bot.sent
+                if m["method"] == "SendMessage"
+                and m["chat_id"] in (CHAT_ID, CHAT_ID_2)]
+    assert CHAT_ID_2 in chat_ids, "чат 026КАД должен получить свою замену"
+    assert CHAT_ID not in chat_ids, "чат 26КАД не должен получить чужую замену"
