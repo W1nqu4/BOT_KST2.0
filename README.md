@@ -65,12 +65,33 @@ curl http://localhost:8080/health
 На Linux/macOS в шаге 2 подставь `"$(pwd)/data:/app/data"` вместо
 `"%cd%/data:/app/data"`.
 
+**ВАЖНО про порт.** Сервер внутри контейнера слушает значение `PORT` из
+`.env` (`docker run --env-file` передаёт его внутрь), а `-p` пробрасывает
+порт наружу. Если в `.env` стоит не 8080, проброс нужно согласовать:
+
+```bash
+# в .env: PORT=8099 — тогда пробрасываем тот же порт
+docker run --rm --env-file .env -p 8099:8099 -v "%cd%/data:/app/data" kst-bot
+curl http://localhost:8099/health
+```
+
+Либо переопредели порт прямо в команде (env-переменная приоритетнее `.env`):
+
+```bash
+docker run --rm --env-file .env -e PORT=8080 -p 8080:8080 \
+  -v "%cd%/data:/app/data" kst-bot
+```
+
+`HEALTHCHECK` подстраивается сам: он читает `PORT` из окружения контейнера,
+поэтому менять Dockerfile при смене порта не нужно.
+
 **Что проверить в выводе:**
 
 - сборка проходит без ошибок; в образ не попадает `.env` (секреты) и `tests/`;
 - контейнер работает от непривилегированного пользователя `app`;
-- в логах старта: `web server started`, `background tasks started, count: 6`,
-  `rate limiter installed`, `backup done`;
+- в логах старта: `web server started` (с фактическим портом),
+  `background tasks started, count: 6`, `rate limiter installed`,
+  `backup done`;
 - `curl` возвращает 200; при остановке — `bot stopped` без traceback
   и без `Unclosed client session`.
 
@@ -78,6 +99,10 @@ curl http://localhost:8080/health
 (проверь, что `requirements.txt`, `bot/` и `run.py` не исключены
 в `.dockerignore`) или недоступный `pip` — тогда повтори сборку с
 `--no-cache`.
+
+**Если `curl` не отвечает:** сверь порт в `.env` и в `-p` (см. выше), и
+посмотри в логах строку `web server started` — там фактический порт.
+При занятом порте бот пишет `web server failed to bind` и выходит.
 
 ## Ручной end-to-end тест
 

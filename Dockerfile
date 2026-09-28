@@ -33,12 +33,11 @@ RUN useradd -r -u 1000 app && \
 
 USER app
 
+# EXPOSE — только документация порта; сервер слушает значение из env PORT.
 EXPOSE 8080
 
-# HEALTHCHECK обращается к 127.0.0.1 внутри контейнера. Порт здесь указан
-# как 8080 (значение по умолчанию); если меняешь env PORT, поправь и эту
-# строку — иначе healthcheck будет стучаться не туда и контейнер получит
-# статус unhealthy.
+# HEALTHCHECK сам берёт порт из env PORT (по умолчанию 8080), поэтому
+# менять здесь ничего не нужно даже при смене PORT.
 HEALTHCHECK --interval=60s --timeout=5s --start-period=30s --retries=3 \
     CMD python -c "import os, urllib.request; port = os.environ.get('PORT', '8080'); urllib.request.urlopen(f'http://127.0.0.1:{port}/health', timeout=4)"
 

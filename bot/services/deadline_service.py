@@ -7,6 +7,7 @@
 Дедлайн может быть **без даты**: тогда он попадает в группу «Без даты» и
 никогда не напоминается.
 """
+from __future__ import annotations
 
 import logging
 import re

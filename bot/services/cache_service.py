@@ -21,6 +21,7 @@
 попытка через 5 с при сетевой ошибке (при HTTP 4xx повтора нет). Файл больше
 5 МБ — WARNING, но скачивание продолжается.
 """
+from __future__ import annotations
 
 import asyncio
 import json

@@ -7,6 +7,7 @@
 Ротация — по имени файла: ``bot_YYYYMMDD.db``, старше
 :data:`BACKUP_KEEP_DAYS` дней удаляются.
 """
+from __future__ import annotations
 
 import asyncio
 import logging

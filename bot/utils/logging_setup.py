@@ -4,6 +4,7 @@
 агрегаторов). print() в проекте запрещён. Токен и содержимое .env
 никогда не передаются в логгер.
 """
+from __future__ import annotations
 
 import json
 import logging

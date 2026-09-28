@@ -13,6 +13,7 @@
 
     MIGRATIONS = {1: migrate_1_initial, 2: migrate_2_add_smth}
 """
+from __future__ import annotations
 
 import logging
 import sqlite3

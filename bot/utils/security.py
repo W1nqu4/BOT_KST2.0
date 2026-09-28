@@ -6,6 +6,7 @@
   чтобы не появилось двух разных представлений одной группы.
 - :class:`RateLimiter` — ограничение частоты сообщений по ``tg_id``.
 """
+from __future__ import annotations
 
 import asyncio
 import logging

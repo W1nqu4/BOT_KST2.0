@@ -7,6 +7,7 @@
 Все callback-данные начинаются с ``dl:``. Данные из БД экранируются
 ``html.escape``: пользователь может ввести что угодно, включая теги.
 """
+from __future__ import annotations
 
 import logging
 from datetime import date, datetime

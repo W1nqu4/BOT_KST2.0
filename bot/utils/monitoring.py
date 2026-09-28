@@ -10,6 +10,7 @@
 ``meta``: повторное уведомление по той же причине уходит не чаще, чем раз
 в сутки.
 """
+from __future__ import annotations
 
 import asyncio
 import logging

@@ -3,6 +3,7 @@
 Все данные из БД экранируются через :func:`html.escape` (названия предметов,
 ФИО, кабинеты), потому что сообщения отправляются с ``parse_mode='HTML'``.
 """
+from __future__ import annotations
 
 import logging
 from datetime import date, timedelta

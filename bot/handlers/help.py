@@ -3,6 +3,7 @@
 «Дедлайны» и «Профиль» станут настоящими на шаге 8; здесь они отвечают
 «Раздел в разработке», чтобы кнопки главного меню не молчали.
 """
+from __future__ import annotations
 
 import logging
 from html import escape

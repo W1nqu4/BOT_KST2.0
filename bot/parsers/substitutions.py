@@ -41,6 +41,7 @@
 При любой ошибке парсер НЕ падает: log.warning и пустой список — вызывающий
 код использует последний кэш (правило 6).
 """
+from __future__ import annotations
 
 import logging
 import re

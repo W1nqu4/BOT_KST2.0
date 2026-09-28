@@ -10,6 +10,7 @@
 Класс :class:`ConfigError` наследуется от :class:`RuntimeError`, поэтому
 `except RuntimeError` в вызывающем коде тоже поймает ошибку конфигурации.
 """
+from __future__ import annotations
 
 import logging
 import os

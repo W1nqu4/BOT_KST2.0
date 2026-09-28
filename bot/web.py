@@ -8,6 +8,7 @@
 - ``/calendar/{token}.ics`` — подписка. Токен — единственный идентификатор
   пользователя для внешнего клиента, Telegram id в ссылку не попадает.
 """
+from __future__ import annotations
 
 import json
 import logging

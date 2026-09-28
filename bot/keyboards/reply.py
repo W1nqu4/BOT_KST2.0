@@ -3,6 +3,7 @@
 Тексты кнопок — константы: обработчики сравнивают именно с ними, поэтому
 менять текст нужно в одном месте.
 """
+from __future__ import annotations
 
 from aiogram.types import KeyboardButton, ReplyKeyboardMarkup
 

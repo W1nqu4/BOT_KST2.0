@@ -10,6 +10,7 @@
 Данные из БД экранируются через :func:`html.escape` — в названиях групп и
 предметов возможны символы ``<``, ``>``, ``&``.
 """
+from __future__ import annotations
 
 import difflib
 import logging

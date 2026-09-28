@@ -29,13 +29,14 @@ vMerge. Читаем ``word/document.xml`` из zip напрямую через
 При любой ошибке парсер НЕ падает: log.warning и пустой список —
 вызывающий код использует последний кэш (правило 6).
 """
+from __future__ import annotations
 
 import logging
 import re
 import xml.etree.ElementTree as ET
 import zipfile
 from pathlib import Path
-from typing import NamedTuple
+from typing import NamedTuple, Sequence
 
 from bot.parsers.groups import normalize_group_name
 from bot.parsers.teachers import TEACHERS, full_fio, is_known_surname

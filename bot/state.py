@@ -12,6 +12,7 @@
 поэтому если его нет (например, обработчик не принимает ``state``), вызов
 безопасно игнорируется.
 """
+from __future__ import annotations
 
 import logging
 

@@ -8,6 +8,7 @@
 Если отправка не удалась (пользователь заблокировал бота), помечаем
 ``users.is_active = 0``: иначе рассылка будет биться в него каждый проход.
 """
+from __future__ import annotations
 
 import asyncio
 import hashlib

@@ -10,6 +10,7 @@
 - ``PRAGMA journal_mode=WAL`` — устойчивый к сбоям журнал (для ``:memory:``
   SQLite сам вернёт режим memory, это не ошибка).
 """
+from __future__ import annotations
 
 import os
 import sqlite3

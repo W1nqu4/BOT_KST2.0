@@ -7,6 +7,7 @@
 а сообщение отправляется с ``parse_mode='HTML'`` — иначе разметка сломается
 или пользователь сможет вставить чужую ссылку.
 """
+from __future__ import annotations
 
 import logging
 from datetime import datetime

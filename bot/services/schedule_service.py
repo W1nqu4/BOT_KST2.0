@@ -8,6 +8,7 @@
 Значения ``week_type`` — ровно как в источнике (DOCX) и в кэше:
 ``''`` (пара каждую неделю), ``'Чет'``, ``'нечет'``.
 """
+from __future__ import annotations
 
 import asyncio
 import logging

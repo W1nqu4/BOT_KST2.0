@@ -19,6 +19,7 @@
   UTF-8 (:func:`_fold_line`): кириллица занимает 2 байта, резать по байту
   нельзя — получится битый символ.
 """
+from __future__ import annotations
 
 import hashlib
 import logging

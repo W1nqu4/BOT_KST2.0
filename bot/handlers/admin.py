@@ -8,6 +8,7 @@
 Рассылка не трогает ``is_active`` у тех, кто сообщение получил: этот флаг
 означает «бот не заблокирован», а не «получал рассылку».
 """
+from __future__ import annotations
 
 import asyncio
 import logging

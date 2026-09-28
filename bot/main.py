@@ -13,6 +13,7 @@
   пробует снова через :data:`POLLING_RESTART_DELAY` секунд;
 - rate limit по ``tg_id``: при превышении сообщение молча игнорируется.
 """
+from __future__ import annotations
 
 import asyncio
 import logging
