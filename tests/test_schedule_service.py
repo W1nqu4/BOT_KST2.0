@@ -83,6 +83,110 @@ def test_time_range_known_paras() -> None:
     assert ss.time_range_for_para(3) == "13:15-14:50"
 
 
+# --- субботние звонки: другой график ---
+
+def test_time_range_saturday_para_3() -> None:
+    """Задача: 3 пара в субботу — одним уроком, 12:50-14:20."""
+    assert ss.time_range_for_para(3, is_saturday=True) == "12:50-14:20"
+
+
+def test_time_range_weekday_para_3() -> None:
+    """3 пара в будни — 13:15-14:50 (большая перемена 12:20-13:15)."""
+    assert ss.time_range_for_para(3, is_saturday=False) == "13:15-14:50"
+
+
+def test_time_range_saturday_para_5_is_empty() -> None:
+    """5 пары в субботу нет вовсе → пустая строка (не None)."""
+    assert ss.time_range_for_para(5, is_saturday=True) == ""
+    assert ss.time_range_for_para(5, is_saturday=True) is not None
+
+
+def test_time_range_weekday_para_5() -> None:
+    """5 пара в будни — 16:45-18:05."""
+    assert ss.time_range_for_para(5, is_saturday=False) == "16:45-18:05"
+
+
+def test_time_range_saturday_para_4() -> None:
+    """4 пара в субботу — 14:30-15:50 (одним уроком)."""
+    assert ss.time_range_for_para(4, is_saturday=True) == "14:30-15:50"
+    assert ss.time_range_for_para(4) == "15:00-16:35"
+
+
+def test_time_range_first_two_paras_same_both_days() -> None:
+    """1 и 2 пары в субботу совпадают с буднями (звонки те же)."""
+    for para in (1, 2):
+        assert (ss.time_range_for_para(para, is_saturday=True)
+                == ss.time_range_for_para(para, is_saturday=False))
+
+
+def test_time_range_for_date_uses_weekday() -> None:
+    """Обёртка с датой сама выбирает субботние звонки."""
+    saturday = date(2026, 10, 3)      # суббота
+    friday = date(2026, 10, 2)        # пятница
+    assert saturday.weekday() == 5 and friday.weekday() == 4
+
+    assert ss.time_range_for_date(3, saturday) == "12:50-14:20"
+    assert ss.time_range_for_date(3, friday) == "13:15-14:50"
+    assert ss.time_range_for_date(5, saturday) == ""
+    assert ss.time_range_for_date(5, friday) == "16:45-18:05"
+
+
+def test_time_range_for_date_without_date_is_weekday() -> None:
+    """None → будничные звонки (безопасный дефолт)."""
+    assert ss.time_range_for_date(3, None) == "13:15-14:50"
+
+
+def test_is_saturday_date_helper() -> None:
+    assert ss.is_saturday_date(date(2026, 10, 3)) is True
+    assert ss.is_saturday_date(date(2026, 10, 2)) is False
+    assert ss.is_saturday_date(None) is False
+
+
+def test_bell_times_saturday_matches_official() -> None:
+    """Субботние звонки ровно как в официальном расписании КСТ."""
+    from bot.config import BELL_TIMES_SATURDAY, BELL_TIMES_WEEKDAY
+
+    assert BELL_TIMES_SATURDAY == {
+        1: ("09:00", "10:35"),
+        2: ("10:45", "12:20"),
+        3: ("12:50", "14:20"),
+        4: ("14:30", "15:50"),
+    }
+    assert BELL_TIMES_WEEKDAY[5] == ("16:45", "18:05")
+    assert 5 not in BELL_TIMES_SATURDAY
+
+
+def test_bell_breaks_big_is_shorter_on_saturday() -> None:
+    """Большая перемена в субботу короче: 12:20-12:50 против 12:20-13:15."""
+    from bot.config import BELL_BREAKS_SATURDAY, BELL_BREAKS_WEEKDAY
+
+    assert BELL_BREAKS_WEEKDAY["big"] == ("12:20", "13:15")
+    assert BELL_BREAKS_SATURDAY["big"] == ("12:20", "12:50")
+
+
+def test_saturday_lessons_get_saturday_time(db_with_schedule) -> None:
+    """Реальные субботние пары 26КАД получают субботние звонки."""
+    saturday = date(2026, 10, 3)          # суббота
+    assert saturday.weekday() == 5
+    lessons = ss.get_lessons_for_day(db_with_schedule, GROUP, saturday)
+    assert lessons, "в субботу у 26КАД есть пары"
+
+    by_para = {l["para_number"]: l for l in lessons}
+    # В базе у 26КАД суббота: 1, 2, 3 пары — пятой нет.
+    assert set(by_para) == {1, 2, 3}
+    assert by_para[1]["time_range"] == "09:00-10:35"
+    assert by_para[2]["time_range"] == "10:45-12:20"
+    assert by_para[3]["time_range"] == "12:50-14:20", "субботние звонки"
+
+
+def test_weekday_lessons_keep_weekday_time(db_with_schedule) -> None:
+    """В будни время остаётся будничным (регресс не сломан)."""
+    friday = date(2026, 10, 2)
+    lessons = ss.get_lessons_for_day(db_with_schedule, GROUP, friday)
+    by_para = {l["para_number"]: l for l in lessons}
+    assert by_para[3]["time_range"] == "13:15-14:50"
+
+
 def test_time_range_unknown_para_is_empty() -> None:
     assert ss.time_range_for_para(9) == ""
 

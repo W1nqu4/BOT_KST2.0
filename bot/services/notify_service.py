@@ -26,7 +26,7 @@ from bot.config import (
 )
 from bot.services import cache_service
 from bot.services import deadline_service as dl
-from bot.services.schedule_service import _sleep, time_range_for_para
+from bot.services.schedule_service import _sleep, time_range_for_date
 
 logger = logging.getLogger(__name__)
 
@@ -270,7 +270,25 @@ def substitution_icon(sub: dict) -> str:
     return ICON_SUBSTITUTION
 
 
-def render_substitution_card(sub: dict) -> str:
+def _sub_date(sub: dict, target: date | None = None) -> date | None:
+    """Дата замены: явный target или ``date_iso`` из словаря.
+
+    Нужна, чтобы время пары считалось по звонкам нужного дня (в субботу
+    звонки отличаются от будней).
+    """
+    if target is not None:
+        return target
+    raw = str(sub.get("date_iso") or "").strip()
+    if not raw:
+        return None
+    try:
+        return date.fromisoformat(raw)
+    except ValueError:
+        return None
+
+
+def render_substitution_card(sub: dict,
+                             target: date | None = None) -> str:
     """Карточка одной замены.
 
     Формат: иконка с номером пары, зачёркнутый прежний предмет, новый
@@ -278,6 +296,8 @@ def render_substitution_card(sub: dict) -> str:
 
     Args:
         sub: словарь замены.
+        target: дата замены (если не передана — берётся ``date_iso``):
+            по ней определяется, субботние звонки или будничные.
 
     Returns:
         HTML-текст карточки (без завершающих переводов строк).
@@ -297,7 +317,7 @@ def render_substitution_card(sub: dict) -> str:
         lines.append(f"👤 {teacher}")
     if room:
         lines.append(f"🚪 {room}")
-    time_range = time_range_for_para(para)
+    time_range = time_range_for_date(para, _sub_date(sub, target))
     if time_range:
         lines.append(f"⏰ {time_range}")
     if sub.get("is_cancelled"):
@@ -366,7 +386,7 @@ def render_substitution_notification(group: str, subs: list[dict],
         f"<i>{escape(group)} · {escape(weekday_name(target))}, "
         f"{target.strftime('%d.%m')}</i>"
     )
-    blocks = [render_substitution_card(sub) for sub in subs]
+    blocks = [render_substitution_card(sub, target) for sub in subs]
     footer = "<i>Загляни в «Расписание» — там всё уже с учётом этих замен.</i>"
     return split_blocks(header, blocks, footer)
 async def _send_to_user(conn, bot, tg_id: int, texts: list[str]) -> bool:

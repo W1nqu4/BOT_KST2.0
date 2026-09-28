@@ -362,6 +362,33 @@ def test_ics_uses_bell_times(conn_with_schedule) -> None:
     assert "T103500" in text
 
 
+def test_ics_saturday_uses_saturday_bell_times(conn_with_schedule) -> None:
+    """Суббота: 3 пара в .ics идёт 12:50-14:20 (не будничные 13:15-14:50)."""
+    saturday = date(2026, 10, 3)
+    assert saturday.weekday() == 5
+
+    text = ics.build_ics(conn_with_schedule, GROUP, today=saturday, horizon_days=0)
+
+    starts = [l for l in text.splitlines() if l.startswith("DTSTART;TZID")]
+    assert starts, "в субботу у 26КАД должны быть события"
+
+    # 1 пара 09:00-10:35 и 3 пара 12:50-14:20 (субботний график).
+    assert "T090000" in text
+    assert "T125000" in text, "3 пара должна начинаться в 12:50"
+    assert "T142000" in text, "3 пара должна заканчиваться в 14:20"
+    assert "T131500" not in text, "будничное 13:15 в субботу не должно появиться"
+
+
+def test_ics_friday_uses_weekday_bell_times(conn_with_schedule) -> None:
+    """Пятница: 3 пара идёт по будничным звонкам — 13:15-14:50."""
+    friday = date(2026, 10, 2)
+    assert friday.weekday() == 4
+
+    text = ics.build_ics(conn_with_schedule, GROUP, today=friday, horizon_days=0)
+    assert "T131500" in text
+    assert "T145000" in text
+
+
 def test_build_test_ics_single_event() -> None:
     """Проверочный .ics: одно событие через 2 минуты."""
     text = ics.build_test_ics(GROUP, minutes_ahead=2,

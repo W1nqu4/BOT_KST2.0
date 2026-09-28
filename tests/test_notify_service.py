@@ -357,6 +357,26 @@ def test_render_no_subs_returns_empty() -> None:
     assert ns.render_substitution_notification("26КАД", [], TARGET) == []
 
 
+SATURDAY = date(2026, 10, 3)
+
+
+def test_render_card_saturday_uses_saturday_time() -> None:
+    """Замена в субботу: время по субботним звонкам (3 пара — 12:50-14:20)."""
+    sub = dict(SUB_FULL, para=3, date_iso=SATURDAY.isoformat())
+    body = ns.render_substitution_notification("26КАД", [sub], SATURDAY)[0]
+    assert "⏰ 12:50-14:20" in body
+    assert "13:15-14:50" not in body
+
+
+def test_render_card_weekday_uses_weekday_time() -> None:
+    """Замена в будни: время по будничным звонкам (регресс не сломан)."""
+    sub = dict(SUB_FULL, para=3, date_iso="2026-10-02")   # пятница
+    body = ns.render_substitution_notification(
+        "26КАД", [sub], date(2026, 10, 2)
+    )[0]
+    assert "⏰ 13:15-14:50" in body
+
+
 # --- split_blocks ---
 
 def test_split_short_message_single_part() -> None:

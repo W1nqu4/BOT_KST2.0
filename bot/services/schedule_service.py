@@ -15,7 +15,8 @@ import logging
 from datetime import date, timedelta
 
 from bot.config import (
-    BELL_TIMES,
+    BELL_TIMES_SATURDAY,
+    BELL_TIMES_WEEKDAY,
     SCHEDULE_REFRESH_SECONDS,
     SUBSTITUTIONS_REFRESH_SECONDS,
 )
@@ -49,19 +50,53 @@ def week_type_for_date(d: date) -> str:
     return WEEK_TYPE_EVEN if d.day % 2 == 0 else WEEK_TYPE_ODD
 
 
-def time_range_for_para(para_number: int) -> str:
+def is_saturday_date(d: date | None) -> bool:
+    """Суббота ли эта дата (``weekday() == 5``).
+
+    Args:
+        d: дата или None.
+
+    Returns:
+        True для субботы, False для None и остальных дней.
+    """
+    return d is not None and d.weekday() == 5
+
+
+def time_range_for_para(para_number: int, is_saturday: bool = False) -> str:
     """Время пары по звонкам: ``'09:00-10:35'``; пустая строка, если пары нет.
+
+    В субботу звонки другие: третья и четвёртая пары идут одним уроком
+    (короче большая перемена), пятой пары нет вовсе. Поэтому пятница и
+    суббота дают для одной и той же пары разное время, а для 5 пары в
+    субботу — пустую строку.
 
     Args:
         para_number: номер пары (1..5).
+        is_saturday: True, если день — суббота.
 
     Returns:
         Интервал вида ``'HH:MM-HH:MM'`` или ``''`` для неизвестного номера.
     """
-    bells = BELL_TIMES.get(para_number)
+    bells_map = BELL_TIMES_SATURDAY if is_saturday else BELL_TIMES_WEEKDAY
+    bells = bells_map.get(para_number)
     if bells is None:
         return ""
     return f"{bells[0]}-{bells[1]}"
+
+
+def time_range_for_date(para_number: int, d: date | None) -> str:
+    """Время пары с учётом дня недели (суббота → субботние звонки).
+
+    Удобная обёртка, чтобы вызывающий код не повторял проверку дня недели.
+
+    Args:
+        para_number: номер пары (1..5).
+        d: дата занятия (None → будничные звонки).
+
+    Returns:
+        Интервал вида ``'HH:MM-HH:MM'`` или ``''``.
+    """
+    return time_range_for_para(para_number, is_saturday_date(d))
 
 
 def _matches_week_type(lesson_week_type: str, target: str) -> bool:
@@ -110,7 +145,7 @@ def get_lessons_for_day(conn, group: str, d: date) -> list[dict]:
             "teacher": row["teacher"],
             "room": row["room"],
             "week_type": row["week_type"],
-            "time_range": time_range_for_para(para),
+            "time_range": time_range_for_date(para, d),
         })
 
     # Сортировка по номеру пары как по числу, а не по строке.
@@ -174,7 +209,7 @@ def apply_substitutions(conn, lessons: list[dict], group: str,
                 "teacher": sub["teacher"],
                 "room": sub["room"],
                 "week_type": week_type_for_date(d),
-                "time_range": time_range_for_para(para),
+                "time_range": time_range_for_date(para, d),
                 "is_substitution": True,
                 "is_cancelled": cancelled,
                 "is_self_study": self_study,
