@@ -138,7 +138,9 @@ def build_stats_text(conn, db_path: str) -> str:
         lines.append("🎓 <b>По группам:</b> пока нет данных")
 
     history_rows = db.count_substitution_history(conn)
+    history_dates = db.count_substitution_history_dates(conn)
     history_earliest = db.earliest_substitution_history_date(conn)
+    history_latest = db.latest_substitution_history_date(conn)
 
     lines.extend([
         f"💾 Размер БД: <b>{size}</b>",
@@ -150,8 +152,9 @@ def build_stats_text(conn, db_path: str) -> str:
         lines.append("📜 История замен: пусто")
     else:
         lines.append(
-            f"📜 История замен: <b>{history_rows}</b> записей, "
-            f"с {escape(history_earliest)}"
+            f"📜 История замен: <b>{history_rows}</b> записей за "
+            f"<b>{history_dates}</b> дн., с {escape(history_earliest)} "
+            f"по {escape(str(history_latest))}"
         )
     return "\n".join(lines)
 

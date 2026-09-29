@@ -331,6 +331,75 @@ def test_pinned_message_helpers(conn: sqlite3.Connection) -> None:
     assert db.clear_pinned_message(conn, 424242) is False
 
 
+def test_save_substitution_history_keeps_cancelled(
+        conn: sqlite3.Connection) -> None:
+    """Отмена (is_cancelled=1, пустой new_subject) сохраняется в историю."""
+    from bot import db
+
+    apply_migrations(conn)
+    cancelled = dict(SUB_HIST_ROW, para=1, old_subject="", new_subject="",
+                     teacher="", room="", is_cancelled=True)
+
+    saved = db.save_substitution_history(conn, "26КАД", "2026-09-29",
+                                         [cancelled])
+
+    assert saved == 1
+    assert db.count_substitution_history(conn) == 1
+    row = conn.execute("SELECT * FROM substitution_history").fetchone()
+    assert row["is_cancelled"] == 1
+    assert row["new_subject"] == ""
+    assert row["old_subject"] == ""
+
+
+def test_save_substitution_history_keeps_self_study(
+        conn: sqlite3.Connection) -> None:
+    """Самостоятельная работа тоже сохраняется."""
+    from bot import db
+
+    apply_migrations(conn)
+    self_study = dict(SUB_HIST_ROW, is_self_study=True)
+
+    db.save_substitution_history(conn, "26КАД", "2026-09-29", [self_study])
+
+    row = conn.execute("SELECT is_self_study FROM substitution_history").fetchone()
+    assert row["is_self_study"] == 1
+
+
+def test_get_substitution_history_dates(conn: sqlite3.Connection) -> None:
+    """get_substitution_history_dates возвращает уникальные даты по порядку."""
+    from bot import db
+
+    apply_migrations(conn)
+    assert db.get_substitution_history_dates(conn) == []
+
+    db.save_substitution_history(conn, "26КАД", "2026-09-29", [SUB_HIST_ROW])
+    db.save_substitution_history(conn, "26КАД", "2026-09-28",
+                                 [dict(SUB_HIST_ROW, para=3)])
+    db.save_substitution_history(conn, "25КАД", "2026-09-29",
+                                 [dict(SUB_HIST_ROW, para=4)])
+
+    assert db.get_substitution_history_dates(conn) == [
+        "2026-09-28", "2026-09-29"
+    ]
+    assert db.count_substitution_history_dates(conn) == 2
+    assert db.count_substitution_history(conn) == 3
+
+
+def test_latest_substitution_history_date(conn: sqlite3.Connection) -> None:
+    """latest вернёт самую позднюю дату, earliest — самую раннюю."""
+    from bot import db
+
+    apply_migrations(conn)
+    assert db.latest_substitution_history_date(conn) is None
+
+    db.save_substitution_history(conn, "26КАД", "2026-09-28", [SUB_HIST_ROW])
+    db.save_substitution_history(conn, "26КАД", "2026-10-05",
+                                 [dict(SUB_HIST_ROW, para=3)])
+
+    assert db.earliest_substitution_history_date(conn) == "2026-09-28"
+    assert db.latest_substitution_history_date(conn) == "2026-10-05"
+
+
 def test_insert_and_read_user(conn: sqlite3.Connection) -> None:
     apply_migrations(conn)
     _insert_user(conn)

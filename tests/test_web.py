@@ -86,6 +86,8 @@ async def test_health_reports_substitution_history(client, conn,
     payload = await (await client.get("/health")).json()
     assert payload["substitution_history_rows"] == 1
     assert payload["substitution_history_earliest"] == "2026-09-28"
+    assert payload["substitution_history_dates_count"] == 1
+    assert payload["substitution_history_latest"] == "2026-09-28"
 
 
 async def test_health_reports_groups_with_schedule(client,

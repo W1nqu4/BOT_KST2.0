@@ -294,32 +294,38 @@ def save_substitutions(conn, rows: list[dict]) -> int:
     return len(rows)
 
 
-def save_history_for_known_groups(conn, rows: list[dict]) -> dict[str, int]:
-    """Записать лист замен в историю — только для групп с пользователями.
+def save_history(conn, rows: list[dict]) -> dict[str, int]:
+    """Записать лист замен в историю — для ВСЕХ групп листа.
 
-    Нормализация имён берётся из парсера (``row["group"]`` уже нормализован),
-    но группа из листа замен и группа пользователя могут отличаться
-    написанием, поэтому имена приводим к каноническому виду обе стороны.
+    История — это память о заменах за учебный год, и она должна накапливаться
+    независимо от того, кто из студентов зарегистрирован в боте. Раньше
+    запись шла только для групп из ``users``, из-за чего терялось почти всё:
+    на живом листе сохранялось 4 записи из 85 (включая 16 отмен), потому что
+    зарегистрированы были лишь 3 группы из 46.
+
+    Ещё одна причина не фильтровать: лист замен на сайте живёт один день.
+    Если в этот день у группы не было пользователей, а завтра появились —
+    замены уже не восстановить. Пользователи приходят и уходят, а история
+    должна оставаться полной.
+
+    Группы из ``users`` — ограничение для UI (кому показывать), не для истории.
 
     Args:
         conn: соединение SQLite.
         rows: разобранный лист замен (``parse_html``).
 
     Returns:
-        Словарь ``{группа: сколько замен записано}`` — только для известных
-        групп; пустой словарь, если писать нечего.
+        Словарь ``{группа: сколько замен записано}``; пустой, если писать
+        нечего.
     """
     from bot.parsers.groups import normalize_group_name
-
-    known = {normalize_group_name(name) for name in db.get_known_groups(conn)}
-    if not known:
-        return {}
 
     by_group: dict[str, list[dict]] = {}
     for row in rows:
         group = normalize_group_name(str(row.get("group") or ""))
-        if group in known:
-            by_group.setdefault(group, []).append(row)
+        if not group:
+            continue
+        by_group.setdefault(group, []).append(row)
 
     saved: dict[str, int] = {}
     for group, group_rows in by_group.items():
@@ -464,11 +470,12 @@ async def refresh_substitutions(conn,
 
         count = save_substitutions(conn, rows)
 
-        # История замен (шаг 3): пишем В ДОПОЛНЕНИЕ к текущему листу и только
-        # для групп с зарегистрированными пользователями. Ошибка истории не
-        # должна ронять обновление кэша — лист замен важнее.
+        # История замен (шаг 3): пишем В ДОПОЛНЕНИЕ к текущему листу, для всех
+        # групп листа. Лист на сайте живёт один день, поэтому пропустить его
+        # нельзя — иначе замены за этот день потеряются навсегда.
+        # Ошибка истории не должна ронять обновление кэша: лист важнее.
         try:
-            saved_groups = save_history_for_known_groups(conn, rows)
+            saved_groups = save_history(conn, rows)
             if saved_groups:
                 logger.info("substitution history saved",
                             extra={"groups": len(saved_groups),

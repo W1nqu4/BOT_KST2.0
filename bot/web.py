@@ -62,6 +62,7 @@ async def handle_health(request: web.Request) -> web.Response:
         ).fetchone()[0]
         groups_with_schedule = db.list_available_groups(conn)
         history_rows = db.count_substitution_history(conn)
+        history_dates = db.count_substitution_history_dates(conn)
         history_earliest = db.earliest_substitution_history_date(conn)
     except Exception as exc:
         logger.exception("health check failed")
@@ -82,7 +83,10 @@ async def handle_health(request: web.Request) -> web.Response:
         "lessons_cached": int(lessons),
         "groups_with_schedule": groups_with_schedule,
         "substitution_history_rows": int(history_rows),
+        "substitution_history_dates_count": int(history_dates),
         "substitution_history_earliest": history_earliest,
+        "substitution_history_latest":
+            db.latest_substitution_history_date(conn),
         "public_base_url": public_base_url,
         "checked_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     })

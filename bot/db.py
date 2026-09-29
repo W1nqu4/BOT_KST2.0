@@ -596,6 +596,36 @@ def earliest_substitution_history_date(conn: sqlite3.Connection) -> str | None:
     return str(value) if value else None
 
 
+def latest_substitution_history_date(conn: sqlite3.Connection) -> str | None:
+    """Самая поздняя дата в истории замен или None, если история пуста."""
+    row = conn.execute(
+        "SELECT MAX(date_iso) AS latest FROM substitution_history"
+    ).fetchone()
+    value = row["latest"] if row is not None else None
+    return str(value) if value else None
+
+
+def get_substitution_history_dates(conn: sqlite3.Connection) -> list[str]:
+    """Уникальные даты, по которым есть записи в истории замен.
+
+    Returns:
+        Отсортированный по возрастанию список дат (``YYYY-MM-DD``).
+    """
+    rows = conn.execute(
+        "SELECT DISTINCT date_iso FROM substitution_history ORDER BY date_iso"
+    ).fetchall()
+    return [str(row["date_iso"]) for row in rows]
+
+
+def count_substitution_history_dates(conn: sqlite3.Connection) -> int:
+    """Сколько РАЗНЫХ дат накопилось в истории замен."""
+    return int(
+        conn.execute(
+            "SELECT COUNT(DISTINCT date_iso) FROM substitution_history"
+        ).fetchone()[0]
+    )
+
+
 # ==========================================================================
 # Закрепление расписания в чате (шаг 4)
 # ==========================================================================

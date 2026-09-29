@@ -466,37 +466,51 @@ def _sub_row(group: str, date_iso: str = "2026-09-28",
     }
 
 
-def test_history_written_only_for_known_groups(conn) -> None:
-    """История пишется только для групп из users; чужие игнорируются."""
+def test_history_written_for_all_groups(conn) -> None:
+    """История пишется для ВСЕХ групп листа, независимо от users."""
     from bot import db
 
-    _add_user(conn, 111, "26КАД")
     rows = [_sub_row("26КАД"), _sub_row("26МЭГ"), _sub_row("25КАД")]
 
-    saved = cs.save_history_for_known_groups(conn, rows)
+    saved = cs.save_history(conn, rows)
+
+    assert saved == {"26КАД": 1, "26МЭГ": 1, "25КАД": 1}
+    assert db.count_substitution_history(conn) == 3
+    assert db.get_substitution_history_dates(conn) == ["2026-09-28"]
+
+
+def test_history_written_even_without_any_users(conn) -> None:
+    """Пользователей нет вообще → история всё равно пишется.
+
+    Регресс к дефекту: раньше запись шла только для групп из ``users``, и
+    на живом листе сохранялось 4 записи из 85.
+    """
+    from bot import db
+
+    assert db.get_known_groups(conn) == []
+
+    saved = cs.save_history(conn, [_sub_row("26КАД"), _sub_row("026КАД")])
+
+    assert saved == {"26КАД": 1, "026КАД": 1}
+    assert db.count_substitution_history(conn) == 2
+
+
+def test_history_written_for_unregistered_group_only(conn) -> None:
+    """Группа без пользователей всё равно попадает в историю."""
+    from bot import db
+
+    _add_user(conn, 111, "24С1")          # пользователь другой группы
+    saved = cs.save_history(conn, [_sub_row("26КАД")])
 
     assert saved == {"26КАД": 1}
     assert db.count_substitution_history(conn) == 1
-    row = conn.execute("SELECT * FROM substitution_history").fetchone()
-    assert row["group_name"] == "26КАД"
-
-
-def test_history_not_written_without_users(conn) -> None:
-    """Нет зарегистрированных пользователей → история не пишется вообще."""
-    from bot import db
-
-    saved = cs.save_history_for_known_groups(conn, [_sub_row("26КАД")])
-
-    assert saved == {}
-    assert db.count_substitution_history(conn) == 0
 
 
 def test_history_normalizes_group_names(conn) -> None:
-    """«26 кад» из листа и «26КАД» из users — одна группа."""
+    """«26 кад» из листа нормализуется в «26КАД»."""
     from bot import db
 
-    _add_user(conn, 111, "26КАД")
-    saved = cs.save_history_for_known_groups(conn, [_sub_row("26 кад")])
+    saved = cs.save_history(conn, [_sub_row("26 кад")])
 
     assert saved == {"26КАД": 1}
     assert db.count_substitution_history(conn) == 1
@@ -506,29 +520,50 @@ def test_history_groups_by_date(conn) -> None:
     """Замены разных дат пишутся отдельными записями."""
     from bot import db
 
-    _add_user(conn, 111, "26КАД")
     rows = [
         _sub_row("26КАД", "2026-09-28", para=2),
         _sub_row("26КАД", "2026-09-28", para=3),
         _sub_row("26КАД", "2026-09-29", para=2),
     ]
 
-    saved = cs.save_history_for_known_groups(conn, rows)
+    saved = cs.save_history(conn, rows)
 
     assert saved == {"26КАД": 3}
     assert db.count_substitution_history(conn) == 3
-    assert db.earliest_substitution_history_date(conn) == "2026-09-28"
+    assert db.get_substitution_history_dates(conn) == [
+        "2026-09-28", "2026-09-29"
+    ]
 
 
-async def test_refresh_substitutions_writes_history_for_users(
+def test_history_keeps_cancelled_rows(conn) -> None:
+    """Отмены сохраняются в историю (это тоже часть истории замен)."""
+    from bot import db
+
+    cancelled = _sub_row("26КАД")
+    cancelled["is_cancelled"] = True
+    cancelled["new_subject"] = ""
+
+    saved = cs.save_history(conn, [cancelled])
+
+    assert saved == {"26КАД": 1}
+    row = conn.execute(
+        "SELECT is_cancelled FROM substitution_history"
+    ).fetchone()
+    assert row["is_cancelled"] == 1
+
+
+async def test_refresh_substitutions_writes_history_always(
     conn, tmp_path: Path, sample_substitutions_path: Path
 ) -> None:
-    """refresh_substitutions пишет историю для групп с пользователями.
+    """refresh_substitutions пишет историю СРАЗУ, без пользователей.
 
-    Группу берём из реального листа замен: сначала смотрим, какие группы там
-    есть, затем регистрируем пользователя одной из них.
+    Регресс к дефекту: раньше история писалась только для групп из ``users``,
+    поэтому при отсутствии регистраций (или когда зарегистрированы другие
+    группы) замены за день терялись безвозвратно — лист на сайте живёт день.
     """
     from bot import db
+
+    assert db.get_known_groups(conn) == [], "пользователей нет вообще"
 
     html_bytes = sample_substitutions_path.read_bytes()
     session = FakeSession({SUBS_URL: FakeResponse(html_bytes, 200)})
@@ -536,30 +571,23 @@ async def test_refresh_substitutions_writes_history_for_users(
                                            directory=tmp_path)
     assert count > 0
 
-    # До регистрации пользователей истории нет.
-    assert db.count_substitution_history(conn) == 0
-
-    groups = [r[0] for r in conn.execute(
-        "SELECT DISTINCT group_name FROM substitutions_cache"
-        " ORDER BY group_name LIMIT 1"
-    )]
-    target = groups[0]
-    _add_user(conn, 999, target)
-
-    await cs.refresh_substitutions(conn, session=FakeSession(
-        {SUBS_URL: FakeResponse(html_bytes, 200)}), directory=tmp_path)
-
-    assert db.count_substitution_history(conn) > 0
-    assert conn.execute(
-        "SELECT COUNT(*) FROM substitution_history WHERE group_name = ?",
-        (target,),
-    ).fetchone()[0] > 0
+    assert db.count_substitution_history(conn) > 0, \
+        "история должна писаться и без пользователей"
+    # Групп в истории столько же, сколько в листе.
+    groups_in_list = conn.execute(
+        "SELECT COUNT(DISTINCT group_name) FROM substitutions_cache"
+    ).fetchone()[0]
+    groups_in_history = conn.execute(
+        "SELECT COUNT(DISTINCT group_name) FROM substitution_history"
+    ).fetchone()[0]
+    assert groups_in_history == groups_in_list, \
+        "в историю должны попасть все группы листа"
 
 
-async def test_refresh_substitutions_history_ignores_unregistered_groups(
+async def test_refresh_substitutions_history_covers_unregistered_groups(
     conn, tmp_path: Path, sample_substitutions_path: Path
 ) -> None:
-    """Группы листа замен без пользователей в историю не попадают."""
+    """В историю попадают группы листа, которых нет среди пользователей."""
     from bot import db
 
     html_bytes = sample_substitutions_path.read_bytes()
@@ -569,7 +597,18 @@ async def test_refresh_substitutions_history_ignores_unregistered_groups(
     assert conn.execute(
         "SELECT COUNT(*) FROM substitutions_cache"
     ).fetchone()[0] > 0, "лист замен должен быть в кэше"
-    assert db.count_substitution_history(conn) == 0, "история не должна писаться"
+
+    # Пользователей нет — но история заполнена.
+    assert db.get_known_groups(conn) == []
+    assert db.count_substitution_history(conn) > 0
+    # Ни одна группа листа не потерялась.
+    cache_groups = {r[0] for r in conn.execute(
+        "SELECT DISTINCT group_name FROM substitutions_cache"
+    )}
+    history_groups = {r[0] for r in conn.execute(
+        "SELECT DISTINCT group_name FROM substitution_history"
+    )}
+    assert cache_groups == history_groups
 
 
 async def test_refresh_substitutions_history_does_not_replace_cache(
@@ -655,3 +694,94 @@ async def test_refresh_substitutions_empty_body_keeps_cache(
     assert conn.execute(
         "SELECT COUNT(*) FROM substitutions_cache"
     ).fetchone()[0] == 1
+# --- накопление истории по датам ---
+
+async def test_two_refresh_different_dates_both_in_history(
+    conn, tmp_path: Path, sample_substitutions_path: Path
+) -> None:
+    """Два обновления с РАЗНЫМИ датами → обе даты остаются в истории.
+
+    Проверяем, что история накапливается, а не хранит только последний день.
+    Дату в листе подменяем через сам файл кэша: берём любой день из календаря
+    и убеждаемся, что предыдущая дата не потерялась.
+    """
+    from bot import db
+
+    html_bytes = sample_substitutions_path.read_bytes()
+    await cs.refresh_substitutions(
+        conn, session=FakeSession({SUBS_URL: FakeResponse(html_bytes, 200)}),
+        directory=tmp_path,
+    )
+    first_dates = db.get_substitution_history_dates(conn)
+    assert len(first_dates) == 1
+    first_date = first_dates[0]
+
+    # Готовим лист на другую дату: заменяем год в шапке — дата сдвинется.
+    html_text = html_bytes.decode("utf-8")
+    year = first_date[:4]
+    other_year = str(int(year) + 1)
+    other = html_text.replace(f" {year} ", f" {other_year} ")
+    assert other != html_text, "не удалось подменить дату в образце"
+
+    await cs.refresh_substitutions(
+        conn,
+        session=FakeSession({SUBS_URL: FakeResponse(other.encode(), 200)}),
+        directory=tmp_path,
+    )
+
+    dates = db.get_substitution_history_dates(conn)
+    assert len(dates) == 2, f"ожидались две даты, получено: {dates}"
+    assert first_date in dates, "первая дата не должна пропасть"
+    assert db.count_substitution_history_dates(conn) == 2
+    assert db.earliest_substitution_history_date(conn) == dates[0]
+    assert db.latest_substitution_history_date(conn) == dates[-1]
+
+
+async def test_repeated_refresh_same_date_updates_not_duplicates(
+    conn, tmp_path: Path, sample_substitutions_path: Path
+) -> None:
+    """Повторный refresh той же даты не дублирует записи."""
+    from bot import db
+
+    html_bytes = sample_substitutions_path.read_bytes()
+    for _ in range(3):
+        await cs.refresh_substitutions(
+            conn, session=FakeSession({SUBS_URL: FakeResponse(html_bytes, 200)}),
+            directory=tmp_path,
+        )
+
+    # Три разбора одного листа не должны утроить историю.
+    rows = db.count_substitution_history(conn)
+    in_cache = conn.execute(
+        "SELECT COUNT(*) FROM substitutions_cache"
+    ).fetchone()[0]
+    assert rows == in_cache, "история не должна дублировать записи листа"
+    assert db.count_substitution_history_dates(conn) == 1
+
+
+# --- метрики истории для /health и /stats ---
+
+def test_history_metric_helpers(conn) -> None:
+    """count_dates / earliest / latest / get_dates работают согласованно."""
+    from bot import db
+
+    assert db.count_substitution_history_dates(conn) == 0
+    assert db.get_substitution_history_dates(conn) == []
+    assert db.earliest_substitution_history_date(conn) is None
+    assert db.latest_substitution_history_date(conn) is None
+
+    db.save_substitution_history(conn, "26КАД", "2026-09-28", [
+        {"para": 2, "old_subject": "A", "new_subject": "B", "teacher": "",
+         "room": "", "is_cancelled": False, "is_self_study": False},
+    ])
+    db.save_substitution_history(conn, "26КАД", "2026-09-30", [
+        {"para": 3, "old_subject": "A", "new_subject": "C", "teacher": "",
+         "room": "", "is_cancelled": False, "is_self_study": False},
+    ])
+
+    assert db.get_substitution_history_dates(conn) == [
+        "2026-09-28", "2026-09-30"
+    ]
+    assert db.count_substitution_history_dates(conn) == 2
+    assert db.earliest_substitution_history_date(conn) == "2026-09-28"
+    assert db.latest_substitution_history_date(conn) == "2026-09-30"

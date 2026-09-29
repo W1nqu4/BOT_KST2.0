@@ -174,7 +174,7 @@ def test_build_stats_text_history_empty(conn) -> None:
 
 
 def test_build_stats_text_history_filled(conn) -> None:
-    """История есть — строка с количеством записей и датой начала."""
+    """История есть — строка с записями, числом дней и диапазоном дат."""
     from bot import db
 
     db.save_substitution_history(conn, GROUP, "2026-09-28", [{
@@ -190,7 +190,8 @@ def test_build_stats_text_history_filled(conn) -> None:
 
     body = adm.build_stats_text(conn, "data/test.db")
 
-    assert "📜 История замен: <b>2</b> записей, с 2026-09-28" in body
+    assert "📜 История замен: <b>2</b> записей за <b>2</b> дн.," in body
+    assert "с 2026-09-28 по 2026-09-29" in body
 
 
 def test_count_active_users_since(conn) -> None:
