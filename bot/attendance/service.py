@@ -9,6 +9,7 @@ import logging
 import random
 import re
 
+from bot import db
 from bot.attendance import db as att_db
 from bot.attendance.models import (
     ROLE_DEPUTY,
@@ -174,6 +175,9 @@ def create_group(conn, group_name: str, starosta_tg_id: int,
                         starosta_tg_id=starosta_tg_id)
     att_db.insert_student(conn, starosta_tg_id, group_name, full_name,
                           role=ROLE_STAROSTA)
+    # Связка систем: староста сразу получает группу и для расписания, иначе
+    # «📆 Расписание» после создания группы молчало бы.
+    db.update_user_group_only(conn, starosta_tg_id, group_name, full_name)
     logger.info("study group created",
                 extra={"group": group_name, "starosta": starosta_tg_id})
     return code
@@ -206,8 +210,11 @@ def join_group(conn, tg_id: int, invite_code: str, full_name: str) -> dict:
     existing = att_db.get_student(conn, tg_id)
     if existing is not None:
         # Один студент — одна группа. Повторный ввод кода своей же группы не
-        # ошибка: сообщаем, что он уже там.
+        # ошибка: сообщаем, что он уже там. Связку с расписанием всё равно
+        # восстанавливаем: у студентов, зарегистрированных до появления
+        # связки, записи в ``users`` могло не быть.
         if str(existing["group_name"]) == group_name:
+            db.update_user_group_only(conn, tg_id, group_name, full_name)
             return {"ok": True, "error": None, "group_name": group_name}
         return {"ok": False, "error": "already_in_group",
                 "group_name": group_name}
@@ -217,6 +224,10 @@ def join_group(conn, tg_id: int, invite_code: str, full_name: str) -> dict:
 
     att_db.insert_student(conn, tg_id, group_name, full_name,
                           role=ROLE_STUDENT)
+    # Связка систем: группа для посещаемости становится и группой для
+    # расписания, поэтому «📆 Расписание» работает сразу после ввода кода.
+    # Если у пользователя была другая группа — новая её перезаписывает.
+    db.update_user_group_only(conn, tg_id, group_name, full_name)
     logger.info("student joined group",
                 extra={"group": group_name, "tg_id": tg_id})
     return {"ok": True, "error": None, "group_name": group_name}

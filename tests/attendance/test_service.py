@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from bot import db
 from bot.attendance import db as att_db
 from bot.attendance import service
 from bot.db import get_connection, transaction
@@ -335,3 +336,114 @@ def test_is_group_created(conn, group_with_starosta) -> None:
     """Признак «группа уже создана» для защиты от повторного создания."""
     assert service.is_group_created(conn, GROUP) is True
     assert service.is_group_created(conn, OTHER_GROUP) is False
+
+
+# --- связка users ↔ students (группа для расписания) ---
+#
+# Вступление в группу посещаемости подтягивает за собой группу для
+# расписания (``users.group_name``), иначе «📆 Расписание» после регистрации
+# по коду старосты молчало бы.
+
+def test_join_group_updates_user_group(conn, group_with_starosta) -> None:
+    """join_group выставляет users.group_name автоматически."""
+    assert db.get_user_group(conn, STUDENT_ID) is None
+
+    result = service.join_group(conn, STUDENT_ID, group_with_starosta,
+                                "Иванов И.И.")
+
+    assert result["ok"] is True
+    assert db.get_user_group(conn, STUDENT_ID) == GROUP
+
+
+def test_create_group_sets_starosta_user_group(conn) -> None:
+    """Староста сразу получает users.group_name своей группы."""
+    assert db.get_user_group(conn, STAROSTA_ID) is None
+
+    service.create_group(conn, GROUP, STAROSTA_ID, "Абрамчик С.Г.")
+
+    assert db.get_user_group(conn, STAROSTA_ID) == GROUP
+
+
+def test_join_group_overwrites_previous_user_group(conn) -> None:
+    """Новая группа перезаписывает прежнюю users.group_name."""
+    db.update_user_group_only(conn, STUDENT_ID, OTHER_GROUP)
+    assert db.get_user_group(conn, STUDENT_ID) == OTHER_GROUP
+
+    code = service.create_group(conn, GROUP, STAROSTA_ID, "Абрамчик С.Г.")
+    service.join_group(conn, STUDENT_ID, code, "Иванов И.И.")
+
+    assert db.get_user_group(conn, STUDENT_ID) == GROUP
+
+
+def test_join_group_keeps_user_full_name(conn, group_with_starosta) -> None:
+    """Связка не портит уже сохранённое в users ФИО для админки."""
+    db.update_user_group_only(conn, STUDENT_ID, OTHER_GROUP, "Старое И.И.")
+
+    service.join_group(conn, STUDENT_ID, group_with_starosta, "Иванов И.И.")
+
+    row = conn.execute(
+        "SELECT full_name FROM users WHERE tg_id = ?", (STUDENT_ID,)
+    ).fetchone()
+    assert row["full_name"] == "Иванов И.И."
+
+
+def test_update_user_group_only_inserts_without_existing_user(conn) -> None:
+    """Для нового пользователя создаётся запись с датой регистрации.
+
+    ``created_at`` в схеме обязателен, поэтому вставка без него упала бы —
+    проверяем, что связка работает и на «чистой» базе.
+    """
+    db.update_user_group_only(conn, 9001, GROUP)
+
+    assert db.get_user_group(conn, 9001) == GROUP
+    row = conn.execute(
+        "SELECT created_at, is_active FROM users WHERE tg_id = ?", (9001,)
+    ).fetchone()
+    assert row["created_at"]
+    assert row["is_active"] == 1
+
+
+def test_update_user_group_only_updates_existing_row(conn) -> None:
+    """Повторный вызов не создаёт вторую строку, а меняет группу."""
+    db.update_user_group_only(conn, 9002, GROUP)
+    db.update_user_group_only(conn, 9002, OTHER_GROUP)
+
+    rows = conn.execute(
+        "SELECT group_name FROM users WHERE tg_id = ?", (9002,)
+    ).fetchall()
+    assert len(rows) == 1
+    assert rows[0]["group_name"] == OTHER_GROUP
+
+
+def test_rejoin_same_group_restores_missing_user_group(conn,
+                                                       group_with_starosta
+                                                       ) -> None:
+    """Повторный ввод своего кода восстанавливает пропавшую связку.
+
+    Так чинятся студенты, зарегистрированные до появления связки: в
+    ``students`` они есть, а в ``users`` — нет.
+    """
+    service.join_group(conn, STUDENT_ID, group_with_starosta, "Иванов И.И.")
+    # Имитируем «старую» запись: студент есть, группы для расписания нет.
+    with transaction(conn):
+        conn.execute("DELETE FROM users WHERE tg_id = ?", (STUDENT_ID,))
+    assert db.get_user_group(conn, STUDENT_ID) is None
+
+    result = service.join_group(conn, STUDENT_ID, group_with_starosta,
+                               "Иванов И.И.")
+
+    assert result["ok"] is True
+    assert db.get_user_group(conn, STUDENT_ID) == GROUP
+
+
+def test_join_group_does_not_link_other_group_on_conflict(conn) -> None:
+    """Отказ «уже в другой группе» не подменяет группу для расписания."""
+    code = service.create_group(conn, GROUP, STAROSTA_ID, "Абрамчик С.Г.")
+    service.join_group(conn, STUDENT_ID, code, "Иванов И.И.")
+
+    other_code = service.create_group(conn, OTHER_GROUP, 2001, "Петров П.П.")
+    result = service.join_group(conn, STUDENT_ID, other_code, "Иванов И.И.")
+
+    assert result["ok"] is False
+    assert result["error"] == "already_in_group"
+    assert db.get_user_group(conn, STUDENT_ID) == GROUP

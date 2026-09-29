@@ -142,6 +142,55 @@ def upsert_user(conn: sqlite3.Connection, tg_id: int, group_name: str,
     )
 
 
+def update_user_group_only(conn: sqlite3.Connection, tg_id: int,
+                           group_name: str,
+                           full_name: str | None = None) -> None:
+    """Записать пользователю только группу (остальные поля не трогаем).
+
+    Нужна для связки двух систем групп: посещаемость
+    (``students.group_name``) при вступлении в группу подтягивает за собой
+    группу для расписания (``users.group_name``), чтобы «📆 Расписание»
+    работало сразу после ввода кода от старосты.
+
+    Args:
+        conn: соединение SQLite.
+        tg_id: Telegram id.
+        group_name: нормализованное имя группы.
+        full_name: необязательное ФИО из Telegram. Передаётся только там, где
+            запись идёт из личного диалога (``/setup_schedule``): тогда
+            поведение совпадает с :func:`upsert_user` — имя для админки
+            обновляется, а пользователь снова считается активным. В связке
+            групп ФИО не передаётся, и запись остаётся минимальной.
+
+    Note:
+        ``created_at`` в схеме объявлен ``NOT NULL`` без значения по
+        умолчанию, поэтому при вставке новой строки момент регистрации
+        подставляется здесь (как в :func:`upsert_user`).
+    """
+    from datetime import datetime
+
+    from bot.config import TIMEZONE
+
+    with transaction(conn):
+        cursor = conn.execute(
+            "UPDATE users SET group_name = ? WHERE tg_id = ?",
+            (group_name, tg_id),
+        )
+        if cursor.rowcount == 0:
+            created = datetime.now(TIMEZONE).isoformat(timespec="seconds")
+            conn.execute(
+                "INSERT INTO users (tg_id, group_name, full_name, is_active,"
+                " created_at) VALUES (?, ?, ?, 1, ?)",
+                (tg_id, group_name, full_name or "", created),
+            )
+        elif full_name is not None:
+            conn.execute(
+                "UPDATE users SET full_name = ?, is_active = 1"
+                " WHERE tg_id = ?",
+                (full_name, tg_id),
+            )
+
+
 def list_available_groups(conn: sqlite3.Connection) -> list[str]:
     """Уникальные имена групп из кэша расписания (для проверки ввода).
 

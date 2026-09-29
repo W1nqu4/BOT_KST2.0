@@ -1,18 +1,23 @@
-"""Миграция 10: таблицы групп и студентов (этап 1 посещаемости).
+"""Миграции посещаемости: этап 1 (группы, студенты) и этап 2 (отметки).
 
-Миграция живёт в пакете ``bot.attendance``, но подключается в общий список
+Миграции живут в пакете ``bot.attendance``, но подключаются в общий список
 ``bot.migrations.MIGRATIONS`` — так сохраняется единая нумерация версий схемы
 и идемпотентность ``apply_migrations``.
 
 Ничего из существующих таблиц не меняется: ``users.group_name`` (старая
-система, нужна расписанию и заменам) остаётся как есть, а ``students`` —
-отдельная таблица для посещаемости.
+система, нужна расписанию и заменам) остаётся как есть, а ``students`` и
+``attendance`` — отдельные таблицы для посещаемости.
 """
 from __future__ import annotations
 
 import sqlite3
 
 from bot.attendance.models import (
+    CREATE_ATTENDANCE,
+    CREATE_ATTENDANCE_GROUP_DATE_INDEX,
+    CREATE_ATTENDANCE_POLLS,
+    CREATE_ATTENDANCE_POLLS_GROUP_INDEX,
+    CREATE_ATTENDANCE_TG_ID_INDEX,
     CREATE_STUDENTS,
     CREATE_STUDENTS_GROUP_INDEX,
     CREATE_STUDY_GROUPS,
@@ -39,3 +44,25 @@ def migrate_10_attendance_groups(conn: sqlite3.Connection) -> None:
     conn.execute(CREATE_STUDY_GROUPS_CODE_INDEX)
     conn.execute(CREATE_STUDENTS)
     conn.execute(CREATE_STUDENTS_GROUP_INDEX)
+
+
+def migrate_11_attendance_marks(conn: sqlite3.Connection) -> None:
+    """Миграция 10 → 11: ``attendance`` и ``attendance_polls``.
+
+    ``attendance`` — отметки. ``UNIQUE (group_name, date_iso, para, tg_id)``
+    не даёт поставить две отметки на одну пару: вместо этого статус
+    обновляется (см. :func:`bot.attendance.attendance_db.mark_attendance`).
+
+    ``attendance_polls`` — опросы «кто на паре». ``UNIQUE (group_name,
+    date_iso, para)`` гарантирует один опрос на пару: фоновая задача
+    проверяет пары раз в минуту и без этого ключа слала бы опрос повторно.
+    ``message_id`` редактируется по мере отметок, ``closes_at`` — конец пары.
+
+    Автоматический ``absent`` по закрытию опроса НЕ ставится: прогул
+    фиксирует только староста вручную (``/mark``).
+    """
+    conn.execute(CREATE_ATTENDANCE)
+    conn.execute(CREATE_ATTENDANCE_GROUP_DATE_INDEX)
+    conn.execute(CREATE_ATTENDANCE_TG_ID_INDEX)
+    conn.execute(CREATE_ATTENDANCE_POLLS)
+    conn.execute(CREATE_ATTENDANCE_POLLS_GROUP_INDEX)

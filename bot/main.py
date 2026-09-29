@@ -41,6 +41,7 @@ from bot.services.schedule_service import (
     refresh_schedule_loop,
     refresh_substitutions_loop,
 )
+from bot.attendance.attendance_loop import attendance_loop
 from bot.services.daily_schedule_service import daily_schedule_loop
 from bot.services.history_service import history_cleanup_loop
 from bot.services.pin_service import unpin_after_lessons_loop
@@ -281,6 +282,7 @@ def build_background_tasks(conn, bot, settings) -> list[asyncio.Task]:
         ("health_loop", lambda: health_loop(conn, bot, settings)),
         ("history_cleanup_loop", lambda: history_cleanup_loop(conn)),
         ("daily_schedule_loop", lambda: daily_schedule_loop(conn, bot)),
+        ("attendance_loop", lambda: attendance_loop(conn, bot)),
         ("unpin_after_lessons_loop",
          lambda: unpin_after_lessons_loop(conn, bot)),
     )

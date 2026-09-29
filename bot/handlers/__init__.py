@@ -9,6 +9,7 @@ from __future__ import annotations
 from aiogram import Router
 
 from bot.attendance import admin_handlers as attendance_admin_handlers
+from bot.attendance import attendance_handlers as attendance_marks_handlers
 from bot.attendance import handlers as attendance_handlers
 from bot.handlers import admin as admin_handlers
 from bot.handlers import calendar as calendar_handlers
@@ -29,6 +30,7 @@ from bot.handlers import start as start_handlers
 ROUTERS: tuple[Router, ...] = (
     start_handlers.router,
     attendance_handlers.router,
+    attendance_marks_handlers.router,
     attendance_admin_handlers.router,
     group_chats_handlers.router,
     schedule_handlers.router,

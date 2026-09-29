@@ -16,6 +16,76 @@ ROLE_STUDENT = "student"
 ROLE_DEPUTY = "deputy"
 ROLE_STAROSTA = "starosta"
 
+# --- посещаемость (этап 2) ---
+
+# Статусы отметки.
+STATUS_PRESENT = "present"
+STATUS_LATE = "late"
+STATUS_ABSENT = "absent"
+STATUS_EXCUSED = "excused"
+
+# Порядок переключения статуса старостой в /mark (цикл по кнопке).
+STATUS_CYCLE = (STATUS_PRESENT, STATUS_LATE, STATUS_ABSENT, STATUS_EXCUSED)
+
+# Все допустимые статусы.
+ALL_STATUSES = frozenset(STATUS_CYCLE)
+
+# Способы отметки: студент сам, староста, голосование в чате.
+METHOD_SELF = "self"
+METHOD_STAROSTA = "starosta"
+METHOD_VOTE = "vote"
+
+# Сколько минут после начала пары отметка считается «опоздал».
+LATE_AFTER_MINUTES = 15
+
+# Таблица отметок: одна строка на (группа, дата, пара, студент).
+CREATE_ATTENDANCE = """
+    CREATE TABLE IF NOT EXISTS attendance (
+        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        group_name TEXT    NOT NULL,
+        date_iso   TEXT    NOT NULL,
+        para       INTEGER NOT NULL,
+        tg_id      INTEGER NOT NULL,
+        full_name  TEXT    NOT NULL,
+        status     TEXT    NOT NULL,
+        marked_by  INTEGER NOT NULL,
+        marked_at  TEXT    NOT NULL,
+        method     TEXT    NOT NULL,
+        UNIQUE (group_name, date_iso, para, tg_id)
+    )
+"""
+
+CREATE_ATTENDANCE_GROUP_DATE_INDEX = (
+    "CREATE INDEX IF NOT EXISTS idx_attendance_group_date"
+    " ON attendance (group_name, date_iso)"
+)
+
+CREATE_ATTENDANCE_TG_ID_INDEX = (
+    "CREATE INDEX IF NOT EXISTS idx_attendance_tg_id"
+    " ON attendance (tg_id, date_iso)"
+)
+
+# Таблица опросов: один опрос на (группа, дата, пара).
+CREATE_ATTENDANCE_POLLS = """
+    CREATE TABLE IF NOT EXISTS attendance_polls (
+        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        group_name TEXT    NOT NULL,
+        date_iso   TEXT    NOT NULL,
+        para       INTEGER NOT NULL,
+        chat_id    INTEGER NOT NULL,
+        message_id INTEGER,
+        started_at TEXT    NOT NULL,
+        closes_at  TEXT    NOT NULL,
+        is_closed  INTEGER NOT NULL DEFAULT 0,
+        UNIQUE (group_name, date_iso, para)
+    )
+"""
+
+CREATE_ATTENDANCE_POLLS_GROUP_INDEX = (
+    "CREATE INDEX IF NOT EXISTS idx_attendance_polls_group"
+    " ON attendance_polls (group_name, date_iso)"
+)
+
 # Роли, которым доступны действия старосты (управление группой, назначение
 # зама). Зам может отмечать посещаемость, но не управлять группой.
 ADMIN_ROLES = frozenset({ROLE_STAROSTA})

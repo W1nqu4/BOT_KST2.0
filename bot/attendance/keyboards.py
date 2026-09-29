@@ -36,7 +36,10 @@ CB_BACK = "grp:back"
 CB_MENU = "menu:home"
 
 # Заглушки этапа 2 (кнопки есть, ответ — «скоро»).
-STUB_CALLBACKS = frozenset({CB_MARK, CB_MY_ATTENDANCE, CB_MARK_MANUAL, CB_REPORT})
+# Кнопки «Моя группа». Заглушек больше нет: все ведут в реальные обработчики
+# посещаемости (этап 2) — CB_MARK → /attendance, CB_MY_ATTENDANCE → /my_attendance,
+# CB_MARK_MANUAL → /mark, CB_REPORT → /report_week.
+STUB_CALLBACKS: frozenset[str] = frozenset()
 
 
 def main_kb() -> ReplyKeyboardMarkup:

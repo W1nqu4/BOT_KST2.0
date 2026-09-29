@@ -149,10 +149,11 @@ async def process_group(message: Message, state: FSMContext, conn) -> None:
             await message.answer(text, parse_mode="HTML")
         return
 
-    db.upsert_user(
+    db.update_user_group_only(
         conn, message.from_user.id if message.from_user else 0, group,
         message.from_user.full_name if message.from_user else "",
     )
+    from_schedule = bool((await state.get_data()).get("from_schedule"))
     await state.clear()
 
     await message.answer(
@@ -160,6 +161,14 @@ async def process_group(message: Message, state: FSMContext, conn) -> None:
         parse_mode="HTML",
         reply_markup=reply_kb.main_kb(),
     )
+    if from_schedule:
+        # Вход был из экрана «📆 Расписание» (кнопка «🔢 Указать группу») —
+        # сразу показываем расписание на сегодня, чтобы не заставлять жать
+        # кнопку повторно.
+        from bot.handlers.schedule import send_day
+
+        await send_day(message, conn, group, date.today())
+        return
     await send_dashboard(message, conn, group)
 
 
@@ -168,9 +177,10 @@ async def pick_suggested_group(callback: CallbackQuery, state: FSMContext,
                                conn) -> None:
     """Пользователь выбрал группу из предложенных кнопкой."""
     group = (callback.data or "").removeprefix("group:pick:")
-    db.upsert_user(
+    db.update_user_group_only(
         conn, callback.from_user.id, group, callback.from_user.full_name,
     )
+    from_schedule = bool((await state.get_data()).get("from_schedule"))
     await state.clear()
     if callback.message is not None:
         await callback.message.answer(
@@ -178,7 +188,14 @@ async def pick_suggested_group(callback: CallbackQuery, state: FSMContext,
             parse_mode="HTML",
             reply_markup=reply_kb.main_kb(),
         )
-        await send_dashboard(callback.message, conn, group)
+        if from_schedule:
+            # Выбор подсказанной группы из экрана расписания — сразу
+            # показываем расписание на сегодня.
+            from bot.handlers.schedule import send_day
+
+            await send_day(callback.message, conn, group, date.today())
+        else:
+            await send_dashboard(callback.message, conn, group)
     await callback.answer()
 
 

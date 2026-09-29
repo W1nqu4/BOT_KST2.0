@@ -10,7 +10,7 @@ import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
 from bot.db import get_connection, transaction
-from bot.migrations import apply_migrations
+from bot.migrations import MIGRATIONS, apply_migrations
 from bot.services import cache_service, deadline_service as dl
 from bot.services import ics_service
 from bot.web import CONN_KEY, SETTINGS_KEY, create_app
@@ -60,7 +60,7 @@ async def test_health_ok(client) -> None:
     for key in ("schema_version", "users_count", "last_schedule_update",
                 "lessons_cached", "checked_at"):
         assert key in payload, f"нет ключа {key}"
-    assert payload["schema_version"] == 10
+    assert payload["schema_version"] == max(MIGRATIONS)
     assert payload["users_count"] == 1
     assert payload["lessons_cached"] > 1000
 

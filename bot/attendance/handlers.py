@@ -22,6 +22,8 @@ from aiogram.types import CallbackQuery, Message
 
 from bot import db
 from bot.attendance import db as att_db
+from bot.attendance import attendance_handlers as att_marks
+from bot.attendance import attendance_keyboards as att_kb
 from bot.attendance import keyboards as kb
 from bot.attendance import service
 from bot.attendance import texts
@@ -510,12 +512,86 @@ async def back_to_group(callback: CallbackQuery, state: FSMContext, conn) -> Non
     await callback.answer()
 
 
-# --- заглушки этапа 2 ---
+# --- кнопки посещаемости: реальные обработчики (этап 2) ---
 
-@router.callback_query(F.data.in_(kb.STUB_CALLBACKS))
-async def stub(callback: CallbackQuery) -> None:
-    """Кнопки посещаемости: работа появится на этапе 2."""
-    await callback.answer(texts.STUB_ALERT, show_alert=True)
+@router.callback_query(F.data == kb.CB_MARK)
+async def btn_mark(callback: CallbackQuery, conn) -> None:
+    """«✏️ Отметиться на паре» — экран отметки (этап 2)."""
+    if callback.message is not None:
+        await att_marks.cmd_attendance(callback.message, conn)
+    await callback.answer()
+
+
+@router.callback_query(F.data == kb.CB_MY_ATTENDANCE)
+async def btn_my_attendance(callback: CallbackQuery, conn) -> None:
+    """«📊 Моя посещаемость» — сводка за месяц (этап 2)."""
+    if callback.message is not None:
+        await att_marks.cmd_my_attendance(callback.message, conn)
+    await callback.answer()
+
+
+@router.callback_query(F.data == kb.CB_MARK_MANUAL)
+async def btn_mark_manual(callback: CallbackQuery, conn, bot) -> None:
+    """«✏️ Отметить вручную» — запускает опрос по текущей паре.
+
+    Полноценная ручная отметка доступна командой ``/mark дата пара``:
+    там список студентов с переключением статуса. Здесь — быстрый путь:
+    отправить опрос в чат группы досрочно.
+    """
+    from datetime import datetime
+
+    from bot.attendance import attendance_service as att_svc
+    from bot.config import KRASNOYARSK
+
+    student = _require_student(conn, _callback_tg_id(callback))
+    if student is None:
+        await callback.answer(texts.NOT_REGISTERED, show_alert=True)
+        return
+
+    group_name = str(student["group_name"])
+    now = datetime.now(KRASNOYARSK)
+    para = att_svc.current_para(now)
+
+    if callback.message is not None:
+        if para is None:
+            await callback.message.answer(
+                "Сейчас пары нет. Укажи её явно: "
+                "<code>/mark сегодня 2</code>",
+                parse_mode="HTML",
+            )
+        else:
+            lesson = att_svc.get_lesson_for_para(conn, group_name,
+                                                 now.date(), para)
+            if lesson is None:
+                await callback.message.answer(
+                    "🤔 У группы нет пары с таким номером сейчас.",
+                    parse_mode="HTML",
+                )
+            else:
+                await callback.message.answer(
+                    f"✏️ <b>Ручная отметка</b>\n\n"
+                    f"{para} пара · {now.date().strftime('%d.%m')}\n\n"
+                    "Отправить опрос в чат группы или отметь вручную: "
+                    f"<code>/mark сегодня {para}</code>",
+                    parse_mode="HTML",
+                    reply_markup=att_kb.request_poll_kb(
+                        now.date().isoformat(), para),
+                )
+    await callback.answer()
+
+
+@router.callback_query(F.data == kb.CB_REPORT)
+async def btn_report(callback: CallbackQuery, conn) -> None:
+    """«📊 Отчёт за неделю» — отчёт старосты (этап 2)."""
+    student = _require_student(conn, _callback_tg_id(callback))
+    if student is None:
+        await callback.answer(texts.NOT_REGISTERED, show_alert=True)
+        return
+
+    if callback.message is not None:
+        await att_marks.send_week_report(callback.message, conn,
+                                        str(student["group_name"]))
+    await callback.answer()
 
 
 # --- /make_deputy как команда ---

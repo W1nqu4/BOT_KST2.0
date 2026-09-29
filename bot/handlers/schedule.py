@@ -11,9 +11,15 @@ from html import escape
 
 from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import (
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
+)
 
 from bot import db
+from bot.attendance import keyboards as att_kb
 from bot.keyboards import inline as inline_kb
 from bot.keyboards.reply import BTN_SCHEDULE, BTN_TODAY
 from bot.services.schedule_service import (
@@ -37,6 +43,23 @@ ICON_SELF_STUDY = "📖"    # самостоятельная работа
 NO_LESSONS = (
     "🎉 <b>Пар нет</b>\n"
     "<i>Отдыхай или закрой хвосты по дедлайнам.</i>"
+)
+
+# Callback-данные выбора группы из экрана расписания.
+CB_SET_GROUP = "sched:setgroup"
+
+# Запрос номера группы (ответ на «🔢 Указать группу»).
+ASK_GROUP_TEXT = "Введи номер группы (например, <code>25КАД</code>):"
+
+# Экран «группа не указана». Показывается вместо прежнего молчания: без
+# ``users.group_name`` расписание не построить, поэтому предлагаем указать
+# группу вручную или вступить в группу посещаемости по коду старосты —
+# вступление подтягивает группу для расписания автоматически.
+NO_GROUP_TEXT = (
+    "📆 <b>Расписание</b>\n\n"
+    "Чтобы показывать расписание, укажи свою группу.\n\n"
+    "Если у тебя есть код от старосты — вступи в группу через "
+    "«📊 Моя группа», расписание подключится автоматически."
 )
 
 
@@ -109,10 +132,76 @@ def _render_card(lesson: dict) -> str:
     return "\n".join(lines)
 
 
-def _require_group(message: Message, conn) -> str | None:
-    """Вернуть группу пользователя; None — если он не зарегистрирован."""
-    tg_id = message.from_user.id if message.from_user else 0
-    return db.get_user_group(conn, tg_id)
+def no_group_kb() -> InlineKeyboardMarkup:
+    """Клавиатура экрана «группа не указана».
+
+    Layout:
+        [🔢 Указать группу]
+        [📊 Ввести код от старосты]
+        [🏠 Меню]
+
+    «📊 Ввести код от старосты» ведёт в уже существующую регистрацию
+    посещаемости (``grp:enter_code``): вступление в группу подтягивает
+    ``users.group_name``, и расписание начинает работать само.
+
+    Returns:
+        InlineKeyboardMarkup с тремя кнопками.
+    """
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔢 Указать группу",
+                              callback_data=CB_SET_GROUP)],
+        [InlineKeyboardButton(text="📊 Ввести код от старосты",
+                              callback_data=att_kb.CB_ENTER_CODE)],
+        [InlineKeyboardButton(text="🏠 Меню",
+                              callback_data=inline_kb.CB_MENU)],
+    ])
+
+
+async def _require_group_or_prompt(event: Message | CallbackQuery, conn,
+                                   tg_id: int) -> str | None:
+    """Группа пользователя или экран «укажи группу».
+
+    Заменяет прежнее молчание: раньше без ``users.group_name`` обработчики
+    расписания просто возвращались, и кнопка «📆 Расписание» выглядела
+    сломанной. Теперь вместо этого приходит экран с двумя способами указать
+    группу.
+
+    Args:
+        event: сообщение или callback — куда отвечать и чем подтверждать.
+        conn: соединение SQLite.
+        tg_id: Telegram id пользователя.
+
+    Returns:
+        Имя группы, если она задана, иначе None (экран уже отправлен).
+    """
+    group = db.get_user_group(conn, tg_id)
+    if group:
+        return group
+
+    # Подтягиваем группу у тех, кто вступил в группу посещаемости до
+    # появления связки: у них есть ``students.group_name``, а ``users`` — нет,
+    # хотя обе таблицы описывают одну и ту же учебную группу.
+    from bot.attendance import db as att_db
+
+    student = att_db.get_student(conn, tg_id)
+    if student is not None:
+        student_group = str(student["group_name"] or "")
+        if student_group:
+            db.update_user_group_only(conn, tg_id, student_group)
+            logger.info("schedule group restored from attendance",
+                        extra={"group": student_group, "tg_id": tg_id})
+            return student_group
+
+    kb = no_group_kb()
+    if isinstance(event, CallbackQuery):
+        if event.message is not None:
+            await event.message.answer(NO_GROUP_TEXT, parse_mode="HTML",
+                                       reply_markup=kb)
+        await event.answer()
+        return None
+
+    await event.answer(NO_GROUP_TEXT, parse_mode="HTML", reply_markup=kb)
+    return None
 
 
 async def send_day(message: Message, conn, group: str, d: date,
@@ -145,7 +234,8 @@ async def btn_today(message: Message, conn, state: FSMContext) -> None:
     """
     from bot.state import SCREEN_SCHEDULE_TODAY, set_last_screen
 
-    group = _require_group(message, conn)
+    tg_id = message.from_user.id if message.from_user else 0
+    group = await _require_group_or_prompt(message, conn, tg_id)
     if group is None:
         return
     await set_last_screen(state, SCREEN_SCHEDULE_TODAY)
@@ -157,11 +247,29 @@ async def btn_schedule(message: Message, conn, state: FSMContext) -> None:
     """Кнопка «📆 Расписание» — сегодня + навигация по дням."""
     from bot.state import SCREEN_SCHEDULE_DAY, set_last_screen
 
-    group = _require_group(message, conn)
+    tg_id = message.from_user.id if message.from_user else 0
+    group = await _require_group_or_prompt(message, conn, tg_id)
     if group is None:
         return
     await set_last_screen(state, SCREEN_SCHEDULE_DAY)
     await send_day(message, conn, group, date.today(), state)
+
+
+@router.callback_query(F.data == CB_SET_GROUP)
+async def cb_set_group(callback: CallbackQuery, state: FSMContext) -> None:
+    """«🔢 Указать группу» — запустить ввод группы для расписания.
+
+    Состояние переиспользуется из регистрации расписания
+    (:class:`bot.handlers.start.GroupForm`), поэтому ввод обрабатывает
+    ``process_group`` вместе с проверкой по списку групп из расписания.
+    """
+    from bot.handlers.start import GroupForm
+
+    await state.set_state(GroupForm.waiting_group)
+    await state.update_data(from_schedule=True)
+    if callback.message is not None:
+        await callback.message.answer(ASK_GROUP_TEXT, parse_mode="HTML")
+    await callback.answer()
 
 
 @router.callback_query(F.data == inline_kb.CB_TODAY)
@@ -169,9 +277,10 @@ async def cb_today(callback: CallbackQuery, conn, state: FSMContext) -> None:
     """Устаревший callback «🔄 Сегодня» — показываем сегодняшний день."""
     from bot.state import SCREEN_SCHEDULE_TODAY, set_last_screen
 
-    group = db.get_user_group(conn, callback.from_user.id)
+    group = await _require_group_or_prompt(
+        callback, conn, callback.from_user.id,
+    )
     if group is None:
-        await callback.answer("Сначала выбери группу: /start", show_alert=True)
         return
     await set_last_screen(state, SCREEN_SCHEDULE_TODAY)
     if callback.message is not None:
@@ -208,9 +317,10 @@ async def cb_nav(callback: CallbackQuery, conn, state: FSMContext) -> None:
     )
 
     payload = (callback.data or "").removeprefix(inline_kb.CB_NAV_PREFIX)
-    group = db.get_user_group(conn, callback.from_user.id)
+    group = await _require_group_or_prompt(
+        callback, conn, callback.from_user.id,
+    )
     if group is None:
-        await callback.answer("Сначала выбери группу: /start", show_alert=True)
         return
     await set_last_screen(state, SCREEN_SCHEDULE_DAY)
 
@@ -242,9 +352,10 @@ async def cb_nav(callback: CallbackQuery, conn, state: FSMContext) -> None:
 @router.callback_query(F.data == inline_kb.CB_PICK_DAY)
 async def cb_pick_day(callback: CallbackQuery, conn) -> None:
     """Показать кнопки выбора дня недели."""
-    group = db.get_user_group(conn, callback.from_user.id)
+    group = await _require_group_or_prompt(
+        callback, conn, callback.from_user.id,
+    )
     if group is None:
-        await callback.answer("Сначала выбери группу: /start", show_alert=True)
         return
     if callback.message is not None:
         await callback.message.answer(
@@ -301,9 +412,10 @@ def render_subject_detail(subject: str, lessons: list[dict]) -> str:
 @router.callback_query(F.data == inline_kb.CB_SUBJECTS)
 async def cb_subjects(callback: CallbackQuery, conn) -> None:
     """«📚 Предметы» — список предметов группы студента."""
-    group = db.get_user_group(conn, callback.from_user.id)
+    group = await _require_group_or_prompt(
+        callback, conn, callback.from_user.id,
+    )
     if group is None:
-        await callback.answer("Сначала выбери группу: /start", show_alert=True)
         return
 
     subjects = get_subjects_for_group(conn, group)
@@ -330,9 +442,10 @@ async def cb_subject_show(callback: CallbackQuery, conn, state: FSMContext) -> N
     Индекс сверяется со свежим списком предметов группы: кнопка могла
     устареть (расписание обновилось) — тогда честно просим выбрать заново.
     """
-    group = db.get_user_group(conn, callback.from_user.id)
+    group = await _require_group_or_prompt(
+        callback, conn, callback.from_user.id,
+    )
     if group is None:
-        await callback.answer("Сначала выбери группу: /start", show_alert=True)
         return
 
     raw = (callback.data or "").removeprefix(inline_kb.CB_SUBJECT_PREFIX)
@@ -371,9 +484,10 @@ async def cb_subject_back(callback: CallbackQuery, conn, state: FSMContext) -> N
         set_last_screen,
     )
 
-    group = db.get_user_group(conn, callback.from_user.id)
+    group = await _require_group_or_prompt(
+        callback, conn, callback.from_user.id,
+    )
     if group is None:
-        await callback.answer("Сначала выбери группу: /start", show_alert=True)
         return
     await set_last_screen(state, SCREEN_SCHEDULE_DAY)
     target = await get_screen_date(state) or date.today()
