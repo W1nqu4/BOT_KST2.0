@@ -39,12 +39,12 @@ def conn_with_groups(conn, parsed_schedule):
 # --- reply-клавиатура ---
 
 def test_main_kb_layout() -> None:
-    """Главное меню: ровно три кнопки, две в первом ряду, resize_keyboard."""
+    """Главное меню: четыре кнопки (с «📊 Моя группа»), resize_keyboard."""
     kb = rk.main_kb()
     assert kb.resize_keyboard is True
     assert [[b.text for b in row] for row in kb.keyboard] == [
         [rk.BTN_SCHEDULE, rk.BTN_DEADLINES],
-        [rk.BTN_PROFILE],
+        [rk.BTN_MY_GROUP, rk.BTN_PROFILE],
     ]
 
 
@@ -53,7 +53,7 @@ def test_main_kb_has_no_today_and_no_subjects() -> None:
     labels = [b.text for row in rk.main_kb().keyboard for b in row]
     assert rk.BTN_TODAY not in labels
     assert "📚 Предметы" not in labels
-    assert len(labels) == 3
+    assert len(labels) == 4
 
 
 def test_stub_buttons_have_text() -> None:

@@ -39,6 +39,7 @@ SCREEN_DEADLINES_LIST = "deadlines:list"
 SCREEN_DEADLINES_ADD = "deadlines:add"
 SCREEN_CALENDAR_MAIN = "calendar:main"
 SCREEN_PROFILE = "profile"
+SCREEN_MY_GROUP = "attendance:my_group"
 
 
 async def set_last_screen(state: FSMContext | None, screen: str) -> None:
@@ -112,5 +113,6 @@ def screen_label(screen: str) -> str:
         SCREEN_DEADLINES_ADD: "дедлайны: добавление",
         SCREEN_CALENDAR_MAIN: "календарь: ссылки",
         SCREEN_PROFILE: "профиль",
+        SCREEN_MY_GROUP: "посещаемость: моя группа",
     }
     return labels.get(screen, screen or SCREEN_UNKNOWN)

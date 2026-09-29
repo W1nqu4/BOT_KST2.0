@@ -19,6 +19,7 @@ import logging
 import sqlite3
 from collections.abc import Callable
 
+from bot.attendance.migrations import migrate_10_attendance_groups
 from bot.db import transaction
 
 logger = logging.getLogger(__name__)
@@ -347,6 +348,7 @@ MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     7: migrate_7_group_chat_full_schedule,
     8: migrate_8_substitution_history,
     9: migrate_9_group_chat_pin,
+    10: migrate_10_attendance_groups,
 }
 
 

@@ -1,11 +1,14 @@
-"""Регистрация: /start, ввод группы, дашборд.
+"""Регистрация группы для расписания: ввод группы, дашборд.
 
-Поток пользователя:
+Группа для РАСПИСАНИЯ (``users.group_name``) настраивается здесь. Первый
+``/start`` больше не требует её ввод: приветствие живёт в
+:mod:`bot.attendance.handlers` (оно же показывает главное меню), а сюда
+пользователь попадает по кнопке «📆 Настроить расписание» или «Поменять
+группу» — тогда и запускается :class:`GroupForm`.
 
-1. /start — если группы нет, бот просит её ввести (FSM, GroupForm.waiting_group);
-2. ввод текста проверяется: нормализация → формат → наличие в расписании;
-3. если группы нет в расписании — показываем до трёх похожих (difflib);
-4. сохранение и дашборд с главным меню.
+Группа для ПОСЕЩАЕМОСТИ (``students.group_name``) — отдельная система
+(:mod:`bot.attendance`): она вводится через «📊 Моя группа» по коду
+приглашения. Обе системы сосуществуют: старая нужна расписанию и заменам.
 
 Данные из БД экранируются через :func:`html.escape` — в названиях групп и
 предметов возможны символы ``<``, ``>``, ``&``.
@@ -19,7 +22,7 @@ from datetime import date
 from html import escape
 
 from aiogram import F, Router
-from aiogram.filters import CommandStart
+from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, Message
@@ -46,15 +49,18 @@ MAX_SUGGESTIONS = 3
 
 
 class GroupForm(StatesGroup):
-    """Состояния регистрации."""
+    """Состояния настройки группы для расписания."""
 
     waiting_group = State()
 
 
-GREETING = (
-    "👋 <b>Привет!</b> Это бот расписания КСТ.\n"
-    "Введи номер группы (например, <code>26КАД</code>):"
+ASK_GROUP = (
+    "Введи номер группы для расписания (например, <code>26КАД</code>):"
 )
+
+# Callback кнопки «📆 Настроить расписание»: показывается тем, у кого ещё не
+# выбрана группа для расписания (главное меню при первом входе её не просит).
+CB_SETUP_SCHEDULE = "sched:setup"
 
 
 def is_valid_group(text: str) -> bool:
@@ -82,23 +88,31 @@ def suggest_groups(raw: str, available: list[str]) -> list[str]:
     return difflib.get_close_matches(raw, available, n=MAX_SUGGESTIONS, cutoff=0.5)
 
 
-@router.message(CommandStart())
-async def cmd_start(message: Message, state: FSMContext, conn) -> None:
-    """Обработать /start: приветствие и просьба о группе либо дашборд."""
-    tg_id = message.from_user.id if message.from_user else 0
-    group = db.get_user_group(conn, tg_id)
+@router.message(Command("setup_schedule"))
+async def cmd_setup_schedule(message: Message, state: FSMContext,
+                             conn) -> None:
+    """Команда «Настроить расписание» — запрос группы для расписания."""
+    await state.set_state(GroupForm.waiting_group)
+    await message.answer(ASK_GROUP, parse_mode="HTML")
 
-    if not group:
-        await state.set_state(GroupForm.waiting_group)
-        await message.answer(GREETING, parse_mode="HTML")
-        return
 
-    await state.clear()
-    await message.answer(
-        greet_text(message.from_user.full_name if message.from_user else ""),
-        parse_mode="HTML",
-        reply_markup=reply_kb.main_kb(),
-    )
+@router.message(F.text == reply_kb.BTN_SETUP_SCHEDULE)
+async def btn_setup_schedule(message: Message, state: FSMContext,
+                             conn) -> None:
+    """Кнопка «📆 Настроить расписание» — запрос группы для расписания."""
+    await cmd_setup_schedule(message, state, conn)
+
+
+@router.callback_query(F.data == CB_SETUP_SCHEDULE)
+async def cb_setup_schedule(callback: CallbackQuery, state: FSMContext,
+                            conn) -> None:
+    """Callback «📆 Настроить расписание» из приветствия."""
+    await state.set_state(GroupForm.waiting_group)
+    if callback.message is not None:
+        await callback.message.answer(ASK_GROUP, parse_mode="HTML")
+    await callback.answer()
+
+
 @router.message(GroupForm.waiting_group)
 async def process_group(message: Message, state: FSMContext, conn) -> None:
     """Проверить введённую группу, сохранить и показать дашборд."""

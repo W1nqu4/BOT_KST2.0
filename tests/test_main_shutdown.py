@@ -243,7 +243,7 @@ async def test_run_bot_sets_commands(conn, monkeypatch) -> None:
     await asyncio.wait_for(runner, timeout=5)
 
     assert [c.command for c in fake_bot.commands] == [
-        "start", "help", "settings", "setup", "unsync", "schedule",
+        "start", "help", "settings", "setup", "unsync", "schedule", "mygroup",
     ]
 
 

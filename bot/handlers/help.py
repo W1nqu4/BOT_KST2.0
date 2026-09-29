@@ -19,6 +19,7 @@ from aiogram.types import (
 )
 
 from bot import db
+from bot.attendance import keyboards as att_kb
 from bot.handlers.calendar import (
     BTN_CALENDAR,
     _base_url,
@@ -36,20 +37,26 @@ HELP_TEXT = (
     "• Листает дни ◀️ ▶️ и показывает замены\n"
     "• Ищет ближайшие пары по предмету («📚 Предметы» внутри расписания)\n"
     "• Ведёт твои дедлайны с напоминаниями\n"
-    "• Даёт подписку на .ics-календарь (Google / Apple)\n\n"
+    "• Даёт подписку на .ics-календарь (Google / Apple)\n"
+    "• Группа и посещаемость: код от старосты, список группы\n\n"
     "<b>Команды</b>\n"
     "/start — начать, сменить группу\n"
     "/help — эта справка\n"
     "/settings — настройки уведомлений\n"
+    "/mygroup — моя группа и посещаемость (в разработке)\n"
+    "/make_deputy — назначить зама (только староста)\n"
+    "/admin — админ-панель (только для создателя)\n"
+    "/make_starosta — назначить старосту (только для админа)\n"
     "/schedule — расписание на сегодня (в групповом чате)\n"
     "/setup — привязать чат к группе КСТ (для админа чата)\n"
     "/unsync — отвязать чат (для админа чата)\n\n"
     "<b>Меню</b>\n"
-    "📆 Расписание · 📝 Дедлайны · 👤 Профиль\n\n"
+    "📆 Расписание · 📝 Дедлайны · 📊 Моя группа · 👤 Профиль\n\n"
     "<i>Добавь бота в чат группы — замены будут приходить туда "
     "автоматически.</i>\n\n"
     f"Что-то сломалось? Кнопка «{reply_kb.BTN_FEEDBACK}» — "
-    "в профиле; сообщение уйдёт администратору вместе с контекстом."
+    "в профиле; сообщение уйдёт администратору вместе с контекстом.\n"
+    "По вопросам работы бота — @W1nqu4."
 )
 
 SETTINGS_TEXT = (
@@ -141,13 +148,28 @@ async def btn_profile(message: Message, conn, settings, state: FSMContext) -> No
         f"🔔 Уведомления: <b>{'включены' if notifications else 'выключены'}</b>\n\n"
         "Подпишись на календарь — расписание появится в телефоне само."
     )
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=BTN_CALENDAR,
-                              callback_data="profile:calendar")],
-        [InlineKeyboardButton(text=reply_kb.BTN_FEEDBACK,
-                              callback_data="profile:feedback")],
-    ])
+    kb = att_kb.profile_inline_kb()
     await message.answer(text, parse_mode="HTML", reply_markup=kb)
+
+
+@router.callback_query(F.data == "profile:edit")
+async def cb_profile_edit(callback: CallbackQuery, state: FSMContext) -> None:
+    """«✏️ Изменить данные» — сменить группу для расписания.
+
+    Группа посещаемости меняется только через старосту (один студент — одна
+    группа), поэтому здесь речь именно о группе для расписания.
+    """
+    from bot.handlers.start import GroupForm
+
+    await state.set_state(GroupForm.waiting_group)
+    if callback.message is not None:
+        await callback.message.answer(
+            "✏️ <b>Изменить данные</b>\n\n"
+            "Введи номер группы для расписания (например, "
+            "<code>26КАД</code>):",
+            parse_mode="HTML",
+        )
+    await callback.answer()
 
 
 @router.callback_query(F.data == "profile:feedback")

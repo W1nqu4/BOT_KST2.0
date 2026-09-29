@@ -45,7 +45,7 @@ from bot.services.daily_schedule_service import daily_schedule_loop
 from bot.services.history_service import history_cleanup_loop
 from bot.services.pin_service import unpin_after_lessons_loop
 from bot.utils.logging_setup import setup_logging
-from bot.utils.monitoring import health_loop
+from bot.utils.monitoring import health_loop, notify_admin
 from bot.utils.security import RateLimiter
 from bot.web import create_app
 
@@ -62,6 +62,7 @@ BOT_COMMANDS: tuple[BotCommand, ...] = (
     BotCommand(command="setup", description="Привязать чат к группе КСТ"),
     BotCommand(command="unsync", description="Отвязать чат от группы"),
     BotCommand(command="schedule", description="Расписание на сегодня в чат"),
+    BotCommand(command="mygroup", description="Моя группа и посещаемость"),
 )
 
 
@@ -349,6 +350,13 @@ async def run_bot(settings: Settings, conn, shutdown_event=None) -> None:
         # закрываем сессию, иначе в логах остаётся «Unclosed client session».
         logger.error("could not register bot commands",
                      extra={"error": repr(exc)})
+        # Критичная ошибка старта: сообщаем владельцу в личку, он узнаёт
+        # раньше студентов. Ошибка доставки не мешает основной обработке.
+        await notify_admin(
+            bot, settings,
+            "Не удалось зарегистрировать команды бота — проверь BOT_TOKEN",
+            error=exc, module="main.set_my_commands",
+        )
         await bot.session.close()
         raise SystemExit(4) from exc
 
@@ -396,6 +404,12 @@ async def run_bot(settings: Settings, conn, shutdown_event=None) -> None:
                     "task stopped with error",
                     extra={"task": task.get_name(), "error": repr(result)},
                 )
+                # Фоновая задача умерла — это тихий сбой, о нём надо сказать.
+                await notify_admin(
+                    bot, settings,
+                    f"Фоновая задача {task.get_name()} остановилась из-за ошибки",
+                    error=result, module=f"task.{task.get_name()}",
+                )
 
         await web_runner.cleanup()
         logger.info("web server stopped")
@@ -427,6 +441,21 @@ def main() -> None:
             "has_admin_chat_id": settings.admin_chat_id is not None,
         },
     )
+    # Диагностика админ-доступа: без ADMIN_IDS админ-команды (/admin,
+    # /make_starosta) и личные алерты notify_admin работать не будут.
+    if settings.admin_ids:
+        logger.info(
+            "bot started",
+            extra={
+                "admin_username": "W1nqu4",
+                "admin_ids_count": len(settings.admin_ids),
+                "admin_ids": settings.admin_ids,
+            },
+        )
+    else:
+        logger.warning(
+            "ADMIN_IDS is empty: admin commands and notify_admin disabled",
+        )
     # Порядок логирования из .env применяется после чтения настроек.
     setup_logging(settings.log_level)
 

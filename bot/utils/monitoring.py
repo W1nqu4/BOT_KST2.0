@@ -76,6 +76,133 @@ def get_alert_flag(conn, key: str) -> str | None:
     return cache_service.get_meta(conn, f"{META_ALERT_PREFIX}{key}")
 
 
+# --- notify_admin: личные алерты владельцу (этап 1 посещаемости) ---
+
+# Кулдаун по ключу «модуль + класс ошибки», секунды. Ключи держим в памяти
+# процесса: это оперативные алерты о конкретных сбоях, и после перезапуска
+# полезно узнать о проблеме снова, а не молчать сутки.
+NOTIFY_THROTTLE_SECONDS = 60
+
+# Сколько символов traceback показывать (остальное не читают, а сообщение
+# рискует не пролезть в лимит Telegram).
+NOTIFY_TRACEBACK_LIMIT = 500
+
+# Момент последней отправки по ключу: {(module, error_class): timestamp}.
+_notify_last_sent: dict[tuple[str, str], float] = {}
+
+
+def reset_notify_throttle() -> None:
+    """Сбросить кулдаун notify_admin (для тестов)."""
+    _notify_last_sent.clear()
+
+
+def _first_admin_id(settings) -> int | None:
+    """tg_id первого админа из ``settings.admin_ids`` (или None)."""
+    admin_ids = getattr(settings, "admin_ids", ()) or ()
+    return int(admin_ids[0]) if admin_ids else None
+
+
+def notify_admin_message(text: str, error: Exception | None = None,
+                         module: str = "",
+                         moment: datetime | None = None) -> str:
+    """Собрать текст алерта владельцу.
+
+    Args:
+        text: что случилось (человекочитаемо).
+        error: исключение, если есть.
+        module: имя модуля/задачи, где произошло.
+        moment: момент времени (для тестов).
+
+    Returns:
+        HTML-текст сообщения.
+    """
+    now = moment or datetime.now(TIMEZONE)
+    error_class = type(error).__name__ if error is not None else "—"
+    traceback_text = ""
+    if error is not None:
+        import traceback
+
+        raw = "".join(traceback.format_exception(
+            type(error), error, error.__traceback__
+        ))
+        traceback_text = escape(raw[:NOTIFY_TRACEBACK_LIMIT])
+
+    lines = [
+        "⚠️ <b>Ошибка в боте</b>",
+        "",
+        f"🕐 {now.strftime('%d.%m.%Y %H:%M')} (Krasnoyarsk)",
+        f"📍 Модуль: <b>{escape(module)}</b>",
+        f"❌ <code>{escape(error_class)}</code>",
+        "",
+        escape(text),
+    ]
+    if traceback_text:
+        lines.extend(["", f"<code>{traceback_text}</code>"])
+    lines.extend(["", "По вопросам: @W1nqu4"])
+    return "\n".join(lines)
+
+
+async def notify_admin(bot, settings, text: str,
+                       error: Exception | None = None,
+                       module: str = "",
+                       throttle_seconds: int = NOTIFY_THROTTLE_SECONDS,
+                       now: float | None = None) -> bool:
+    """Сообщить владельцу об ошибке в личку (первому из ``admin_ids``).
+
+    Кулдаун считается по ключу «модуль + класс ошибки»: одна и та же ошибка
+    не долбит в личку чаще, чем раз в ``throttle_seconds``, а разные ошибки
+    приходят независимо.
+
+    Args:
+        bot: объект Bot.
+        settings: настройки (нужен ``admin_ids``).
+        text: что случилось.
+        error: исключение, если есть.
+        module: имя модуля/задачи.
+        throttle_seconds: пауза для повторной такой же ошибки.
+        now: текущий monotonic-момент (для тестов).
+
+    Returns:
+        True, если сообщение отправлено (или False при кулдауне/ошибке).
+    """
+    import time
+
+    admin_id = _first_admin_id(settings)
+    if admin_id is None:
+        logger.warning("notify_admin skipped: admin_ids is empty",
+                       extra={"src_module": module})
+        return False
+
+    error_class = type(error).__name__ if error is not None else "—"
+    key = (module, error_class)
+    moment = time.monotonic() if now is None else now
+
+    last = _notify_last_sent.get(key)
+    if last is not None and moment - last < throttle_seconds:
+        logger.info("notify_admin throttled",
+                    extra={"src_module": module, "error_class": error_class})
+        return False
+
+    _notify_last_sent[key] = moment
+
+    try:
+        await bot.send_message(
+            admin_id,
+            notify_admin_message(text, error=error, module=module),
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+        )
+    except Exception as exc:
+        logger.warning("notify_admin delivery failed",
+                       extra={"admin_id": admin_id, "error": repr(exc)})
+        return False
+
+    logger.info("notify_admin sent",
+                extra={"admin_id": admin_id, "src_module": module,
+                       "error_class": error_class})
+    return True
+
+
 def set_alert_flag(conn, key: str, moment: datetime | None = None) -> None:
     """Запомнить факт отправки алерта."""
     stamp = (moment or datetime.now(TIMEZONE)).isoformat(timespec="seconds")
@@ -210,13 +337,17 @@ async def check_health(conn, bot, settings,
     if fails >= PARSER_FAIL_THRESHOLD and should_alert(
         conn, "parser_fails", moment
     ):
-        await alert_admin(
-            bot, settings,
+        text = (
             f"Источник не обновляется: {fails} неудачных попыток подряд. "
-            "Проверь, не изменился ли формат DOCX/HTML на сайте техникума.",
+            "Проверь, не изменился ли формат DOCX/HTML на сайте техникума."
         )
+        await alert_admin(bot, settings, text)
         set_alert_flag(conn, "parser_fails", moment)
         sent.append("parser_fails")
+        # Дублируем владельцу в личку: ADMIN_CHAT_ID может быть не задан,
+        # а о поломке парсера знать нужно (этап 1: notify_admin).
+        await notify_admin(bot, settings, text,
+                           module="parser.substitutions")
 
     # 2. Устаревший кэш.
     age = cache_age_hours(conn)

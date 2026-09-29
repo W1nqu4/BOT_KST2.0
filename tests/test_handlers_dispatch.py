@@ -127,38 +127,61 @@ def _texts(bot: FakeBot) -> list[str]:
 
 
 async def _register(dp: Dispatcher, bot: FakeBot) -> None:
-    """Провести регистрацию: /start → ввод группы."""
-    await dp.feed_update(bot, _update("/start"))
+    """Провести настройку группы для расписания.
+
+    Первый ``/start`` больше не спрашивает группу (её ввод перенесён в раздел
+    посещаемости), поэтому группа для расписания задаётся командой
+    ``/setup_schedule``.
+    """
+    await dp.feed_update(bot, _update("/setup_schedule"))
     await dp.feed_update(bot, _update("26КАД"))
     bot.sent.clear()
 
 
 def test_bot_commands_declared() -> None:
-    """set_my_commands получает start/help/settings + команды чатов (шаг 2)."""
+    """set_my_commands получает команды чатов и посещаемости."""
     assert [c.command for c in BOT_COMMANDS] == [
-        "start", "help", "settings", "setup", "unsync", "schedule",
+        "start", "help", "settings", "setup", "unsync", "schedule", "mygroup",
     ]
 
 
 def test_dispatcher_includes_conn(dp, conn) -> None:
     """Диспетчер отдаёт хендлерам соединение БД."""
     assert dp.workflow_data["conn"] is conn
-    assert len(all_routers()) == 8
+    # 10 роутеров: добавились attendance и attendance_admin.
+    assert len(all_routers()) == 10
 
 
-async def test_start_asks_for_group_when_unregistered(dp, conn_with_groups) -> None:
-    """/start у нового пользователя просит группу."""
+async def test_start_shows_greeting_without_asking_group(
+        dp, conn_with_groups) -> None:
+    """/start у нового пользователя: приветствие и меню, группа не спрошена.
+
+    Ввод группы для расписания перенесён в «📊 Моя группа» → настройка,
+    поэтому первый /start молчит про группу.
+    """
     bot = FakeBot()
     await dp.feed_update(bot, _update("/start"))
 
-    assert any("Введи номер группы" in t for t in _texts(bot))
+    texts = _texts(bot)
+    assert any("Что я умею" in t for t in texts), "приветствие с описанием"
+    assert any("Моя группа" in t for t in texts)
+    assert not any("Введи номер группы" in t for t in texts)
     assert db.get_user_group(conn_with_groups, USER_ID) is None
+
+
+async def test_setup_schedule_registers_group(dp, conn_with_groups) -> None:
+    """Команда настройки расписания: ввод группы сохраняется."""
+    bot = FakeBot()
+    await dp.feed_update(bot, _update("/setup_schedule"))
+    await dp.feed_update(bot, _update("26КАД"))
+
+    assert db.get_user_group(conn_with_groups, USER_ID) == "26КАД"
 
 
 async def test_entering_group_registers_and_shows_dashboard(dp, conn_with_groups) -> None:
     """Ввод группы 26КАД: сохранение + дашборд."""
     bot = FakeBot()
-    await dp.feed_update(bot, _update("/start"))
+    await dp.feed_update(bot, _update("/setup_schedule"))
     await dp.feed_update(bot, _update("26КАД"))
 
     assert db.get_user_group(conn_with_groups, USER_ID) == "26КАД"
@@ -172,7 +195,7 @@ async def test_entering_group_registers_and_shows_dashboard(dp, conn_with_groups
 async def test_group_normalized_on_input(dp, conn_with_groups) -> None:
     """«26 кад» → «26КАД» (нормализация ввода)."""
     bot = FakeBot()
-    await dp.feed_update(bot, _update("/start"))
+    await dp.feed_update(bot, _update("/setup_schedule"))
     await dp.feed_update(bot, _update("26 кад"))
     assert db.get_user_group(conn_with_groups, USER_ID) == "26КАД"
 
@@ -180,7 +203,7 @@ async def test_group_normalized_on_input(dp, conn_with_groups) -> None:
 async def test_invalid_group_reprompts(dp, conn_with_groups) -> None:
     """Мусор вместо группы — просьба повторить, пользователь не создан."""
     bot = FakeBot()
-    await dp.feed_update(bot, _update("/start"))
+    await dp.feed_update(bot, _update("/setup_schedule"))
     await dp.feed_update(bot, _update("!!!"))
 
     assert any("не похож на настоящий" in t for t in _texts(bot))
@@ -190,7 +213,7 @@ async def test_invalid_group_reprompts(dp, conn_with_groups) -> None:
 async def test_unknown_group_suggests_similar(dp, conn_with_groups) -> None:
     """Несуществующая группа → предложение похожих кнопками."""
     bot = FakeBot()
-    await dp.feed_update(bot, _update("/start"))
+    await dp.feed_update(bot, _update("/setup_schedule"))
     await dp.feed_update(bot, _update("26КД"))
 
     assert any("нет в расписании" in t for t in _texts(bot))
@@ -203,7 +226,7 @@ async def test_unknown_group_suggests_similar(dp, conn_with_groups) -> None:
 
 
 async def test_start_twice_returns_to_dashboard(dp, conn_with_groups) -> None:
-    """Повторный /start зарегистрированного — дашборд, без просьбы о группе."""
+    """Повторный /start зарегистрированного — приветствие, без просьбы о группе."""
     bot = FakeBot()
     await _register(dp, bot)
     await dp.feed_update(bot, _update("/start"))
