@@ -243,15 +243,33 @@ def test_ics_odd_day_has_odd_lesson(conn_with_schedule) -> None:
     assert "Математика" in text
 
 
+def _events_starting_on(text: str, day_text: str) -> list[str]:
+    """Блоки VEVENT, у которых DTSTART приходится на указанную дату.
+
+    Фильтровать по вхождению даты во ВЕСЬ блок нельзя: в каждом событии есть
+    ``DTSTAMP`` с датой генерации (``datetime.now``), поэтому в день, совпадающий
+    с искомой датой, фильтр захватил бы все события подряд, и тест «падал» бы
+    без всякой ошибки в коде. Сравниваем именно строку ``DTSTART``.
+    """
+    blocks: list[str] = []
+    for block in text.split("BEGIN:VEVENT"):
+        for line in block.splitlines():
+            if line.startswith("DTSTART;TZID") and day_text in line:
+                blocks.append(block)
+                break
+    return blocks
+
+
 def test_ics_parity_lesson_not_on_wrong_week(conn_with_schedule) -> None:
     """Пара «Чет»-недели не попадает в нечётный день того же дня недели.
 
     22.09 и 29.09 — оба вторники, но числа 22 (Чет) и 29 (нечет).
     """
     text = ics.build_ics(conn_with_schedule, GROUP, today=DAY)
-    joined = " ".join(
-        block for block in text.split("BEGIN:VEVENT") if "20260929" in block
-    )
+    blocks = _events_starting_on(text, "20260929")
+    assert blocks, "на 29.09 должны быть события"
+
+    joined = " ".join(blocks)
     assert "ОД.03 История" not in joined, "в нечётный вторник История не идёт"
     assert "ОД.07 Математика" in joined
 
@@ -260,9 +278,9 @@ def test_ics_weekly_lesson_in_both_weeks(conn_with_schedule) -> None:
     """Пары с week_type='' (Обществознание, Физика) есть в обе даты вторника."""
     text = ics.build_ics(conn_with_schedule, GROUP, today=DAY)
     for day_text in ("20260922", "20260929"):
-        block = " ".join(
-            part for part in text.split("BEGIN:VEVENT") if day_text in part
-        )
+        blocks = _events_starting_on(text, day_text)
+        assert blocks, f"на {day_text} должны быть события"
+        block = " ".join(blocks)
         assert "Обществознание" in block
         assert "Физика" in block
 
