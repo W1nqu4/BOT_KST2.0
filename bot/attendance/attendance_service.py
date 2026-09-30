@@ -221,8 +221,11 @@ def apply_mark(conn, group: str, date_iso: str, para: int, tg_id: int,
 
     moment_iso = (moment or datetime.now(KRASNOYARSK)).isoformat(
         timespec="seconds")
+    lesson = get_lesson_for_para(conn, group, date.fromisoformat(date_iso),
+                                 para)
     att.mark_attendance(conn, group, date_iso, para, tg_id, full_name,
                         status=status, marked_by=marked_by, method=method,
+                        subject=str(lesson["subject"]) if lesson else None,
                         now=moment_iso)
     logger.info("attendance marked",
                 extra={"group": group, "date": date_iso, "para": para,
@@ -524,13 +527,69 @@ def set_status(conn, group: str, date_iso: str, para: int, tg_id: int,
     if status not in ALL_STATUSES:
         return {"ok": False, "error": "bad_status"}
 
+    lesson = get_lesson_for_para(conn, group, date.fromisoformat(date_iso),
+                                 para)
     att.mark_attendance(conn, group, date_iso, para, tg_id, full_name,
                         status=status, marked_by=marked_by,
-                        method=METHOD_STAROSTA)
+                        method=METHOD_STAROSTA,
+                        subject=str(lesson["subject"]) if lesson else None)
     logger.info("attendance set manually",
                 extra={"group": group, "date": date_iso, "para": para,
                        "tg_id": tg_id, "status": status})
     return {"ok": True, "error": None}
+def month_summary_for_period(conn, tg_id: int, group: str,
+                             period_start: date,
+                             period_end: date | None = None) -> dict:
+    """Сводка посещаемости студента за произвольный период.
+
+    Отличие от :func:`student_month_summary`: период задаёт вызывающий код
+    (нужно для кнопки «📅 Прошлый месяц»), а группа передаётся явно — не
+    приходится ещё раз ходить за ней в БД.
+
+    Args:
+        conn: соединение SQLite.
+        tg_id: студент.
+        group: группа студента.
+        period_start: начало периода.
+        period_end: конец периода (включительно); None — только start.
+
+    Returns:
+        ``{'month_title': str, 'counts': {status: N},
+        'by_subject': [{'subject', 'present', 'total'}]}``.
+    """
+    from bot.attendance import attendance_texts as atext
+
+    end = period_end or period_start
+    rows = att.get_attendance_for_student(conn, tg_id, period_start.isoformat(),
+                                          end.isoformat())
+
+    counts = {status: 0 for status in STATUS_CYCLE}
+    subjects: dict[str, dict] = {}
+
+    for row in rows:
+        status = str(row["status"])
+        if status in counts:
+            counts[status] += 1
+
+        row_day = date.fromisoformat(str(row["date_iso"]))
+        lesson = get_lesson_for_para(conn, group, row_day, int(row["para"]))
+        subject = str(lesson.get("subject") if lesson else "Без предмета")
+        item = subjects.setdefault(subject, {"subject": subject,
+                                            "present": 0, "total": 0})
+        item["total"] += 1
+        if status == STATUS_PRESENT:
+            item["present"] += 1
+
+    by_subject = sorted(subjects.values(), key=lambda item: item["subject"])
+    return {
+        # Заголовок месяца — по началу периода: для прошлого месяца это его
+        # собственный месяц, для текущего — текущий.
+        "month_title": atext.month_title(period_start),
+        "counts": counts,
+        "by_subject": by_subject,
+    }
+
+
 def student_month_summary(conn, tg_id: int,
                           day: date | None = None) -> dict:
     """Сводка посещаемости студента за месяц.

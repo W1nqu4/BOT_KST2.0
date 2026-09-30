@@ -39,6 +39,11 @@ METHOD_VOTE = "vote"
 LATE_AFTER_MINUTES = 15
 
 # Таблица отметок: одна строка на (группа, дата, пара, студент).
+#
+# ``subject`` — снимок названия предмета на момент отметки (миграция 12).
+# Он нужен сводке аттестации: расписание может измениться, а считаться
+# должны те предметы, что были в момент отметки. Для записей до миграции
+# колонка NULL — тогда предмет подтягивается из ``schedule_cache``.
 CREATE_ATTENDANCE = """
     CREATE TABLE IF NOT EXISTS attendance (
         id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -51,6 +56,7 @@ CREATE_ATTENDANCE = """
         marked_by  INTEGER NOT NULL,
         marked_at  TEXT    NOT NULL,
         method     TEXT    NOT NULL,
+        subject    TEXT,
         UNIQUE (group_name, date_iso, para, tg_id)
     )
 """

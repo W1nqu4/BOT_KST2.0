@@ -195,8 +195,9 @@ async def test_my_group_student_sees_student_kb(dp, conn) -> None:
     assert "Студентов: <b>2</b>" in body
     labels = " | ".join(_buttons(bot))
     assert "Отметиться на паре" in labels
-    assert "Моя посещаемость" in labels
     assert "Список группы" in labels
+    # «Моя посещаемость» переехала в «Профиль» — в «Моей группе» её нет.
+    assert "Моя посещаемость" not in labels
 
 
 async def test_my_group_starosta_sees_starosta_kb(dp, conn) -> None:
@@ -499,3 +500,88 @@ async def test_manage_shows_code_for_starosta(dp, conn) -> None:
     body = " ".join(_texts(bot))
     assert "Управление группой" in body
     assert code in body
+# --- /my_attendance и /report_week с блоком аттестации ---
+
+async def test_my_attendance_shows_attestation_block(dp, conn) -> None:
+    """/my_attendance показывает блок аттестации по предметам."""
+    code = service.create_group(conn, GROUP, STAROSTA_ID, "Абрамчик С.Г.")
+    service.join_group(conn, STUDENT_ID, code, "Иванов И.И.")
+    bot = AttendanceBot()
+
+    await dp.feed_update(bot, _update("/my_attendance", STUDENT_ID))
+
+    body = " ".join(_texts(bot))
+    assert "📊 <b>Моя посещаемость</b>" in body
+    assert "Аттестация по предметам" in body
+    assert "Минимум 3 пары" in body
+
+
+async def test_my_attendance_period_buttons(dp, conn) -> None:
+    """Под сводкой — кнопки периода: обновить, прошлый месяц, назад, меню."""
+    code = service.create_group(conn, GROUP, STAROSTA_ID, "Абрамчик С.Г.")
+    service.join_group(conn, STUDENT_ID, code, "Иванов И.И.")
+    bot = AttendanceBot()
+
+    await dp.feed_update(bot, _update("/my_attendance", STUDENT_ID))
+
+    labels = " | ".join(_buttons(bot))
+    assert "Обновить" in labels
+    assert "Прошлый месяц" in labels
+    assert "Назад" in labels
+
+
+async def test_my_attendance_prev_month_recalculates(dp, conn) -> None:
+    """«📅 Прошлый месяц» пересчитывает сводку на прошлый период."""
+    from bot.attendance import attendance_texts as atext
+    from bot.attendance import attestation_service as atts
+
+    code = service.create_group(conn, GROUP, STAROSTA_ID, "Абрамчик С.Г.")
+    service.join_group(conn, STUDENT_ID, code, "Иванов И.И.")
+    bot = AttendanceBot()
+
+    await dp.feed_update(bot, _update("/my_attendance", STUDENT_ID))
+    current = " ".join(_texts(bot))
+    bot.sent.clear()
+
+    await dp.feed_update(bot, _callback(f"{kb.CB_ATT_PERIOD_PREFIX}-1",
+                                        STUDENT_ID))
+
+    previous = " ".join(_texts(bot))
+    prev_title = atext.month_title(atts.period_for_month(offset_months=-1)[0])
+    assert prev_title in previous, "заголовок прошлого месяца"
+    assert current != previous
+
+
+async def test_report_week_shows_attestation_blocks(dp, conn) -> None:
+    """/report_week старосты: блоки риска и отличников."""
+    service.create_group(conn, GROUP, STAROSTA_ID, "Абрамчик С.Г.")
+    bot = AttendanceBot()
+
+    await dp.feed_update(bot, _update("/report_week", STAROSTA_ID))
+
+    body = " ".join(_texts(bot))
+    assert "Отчёт за неделю" in body
+    assert "Под угрозой неаттестации" in body
+
+
+async def test_report_week_buttons(dp, conn) -> None:
+    """Под отчётом — «🔄 Обновить» и «🏠 Главное меню»."""
+    service.create_group(conn, GROUP, STAROSTA_ID, "Абрамчик С.Г.")
+    bot = AttendanceBot()
+
+    await dp.feed_update(bot, _update("/report_week", STAROSTA_ID))
+
+    labels = " | ".join(_buttons(bot))
+    assert "Обновить" in labels
+    assert "Главное меню" in labels
+
+
+async def test_report_week_denied_for_student(dp, conn) -> None:
+    """Обычному студенту отчёт недоступен."""
+    code = service.create_group(conn, GROUP, STAROSTA_ID, "Абрамчик С.Г.")
+    service.join_group(conn, STUDENT_ID, code, "Иванов И.И.")
+    bot = AttendanceBot()
+
+    await dp.feed_update(bot, _update("/report_week", STUDENT_ID))
+
+    assert any("только старосте" in t for t in _texts(bot))

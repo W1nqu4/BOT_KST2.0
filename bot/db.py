@@ -313,6 +313,55 @@ def get_lessons_for_teacher(conn: sqlite3.Connection,
     ]
 
 
+def get_all_students_with_group(conn: sqlite3.Connection) -> list[dict]:
+    """Все активные пользователи с группой (для личных рассылок).
+
+    Напоминания уходят в личку, поэтому источник — ``users`` (там лежит
+    ``users.group_name``, группа для расписания), а не ``students``:
+    расписание строится именно по группе пользователя, и студент, вступивший
+    в группу посещаемости, получает ту же группу и здесь (см.
+    :func:`update_user_group_only`).
+
+    Returns:
+        Список словарей ``{'tg_id': int, 'group_name': str}``, отсортированный
+        по ``tg_id`` (стабильный порядок рассылки).
+    """
+    rows = conn.execute(
+        "SELECT DISTINCT tg_id, group_name FROM users"
+        " WHERE group_name IS NOT NULL AND group_name <> '' AND is_active = 1"
+        " ORDER BY tg_id"
+    ).fetchall()
+    return [{"tg_id": int(row["tg_id"]),
+             "group_name": str(row["group_name"])} for row in rows]
+
+
+def get_meta(conn: sqlite3.Connection, key: str) -> str | None:
+    """Прочитать значение из таблицы ``meta`` (None, если ключа нет).
+
+    Отличие от :func:`bot.services.cache_service.get_meta`: здесь нет
+    зависимости от ``cache_service`` (он импортирует ``bot.db`` — импорт в
+    обратную сторону дал бы цикл). Читают обе функции одну и ту же таблицу.
+    """
+    row = conn.execute(
+        "SELECT value FROM meta WHERE key = ?", (key,)
+    ).fetchone()
+    return str(row["value"]) if row is not None else None
+
+
+def set_meta(conn: sqlite3.Connection, key: str, value: str) -> None:
+    """Записать значение в ``meta`` (upsert).
+
+    Нужна фоновым задачам: по метке в ``meta`` они понимают, что разовая
+    работа за период уже сделана (например, недельная рассылка прогульщикам).
+    """
+    with transaction(conn):
+        conn.execute(
+            "INSERT INTO meta (key, value) VALUES (?, ?)"
+            " ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (key, value),
+        )
+
+
 def count_users(conn: sqlite3.Connection) -> int:
     """Количество активных пользователей (для /stats на шаге 11)."""
     return int(

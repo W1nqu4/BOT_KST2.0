@@ -524,9 +524,30 @@ async def btn_mark(callback: CallbackQuery, conn) -> None:
 
 @router.callback_query(F.data == kb.CB_MY_ATTENDANCE)
 async def btn_my_attendance(callback: CallbackQuery, conn) -> None:
-    """«📊 Моя посещаемость» — сводка за месяц (этап 2)."""
+    """«📊 Моя посещаемость» — сводка за месяц (этап 2).
+
+    Идентификатор берём у автора нажатия (``callback.from_user``), а не у
+    ``callback.message``: сообщение с кнопкой отправлено ботом, и его
+    ``from_user`` — сам бот, а не студент.
+    """
     if callback.message is not None:
-        await att_marks.cmd_my_attendance(callback.message, conn)
+        await att_marks.send_my_attendance(callback.message, conn,
+                                           callback.from_user.id)
+    await callback.answer()
+
+
+@router.callback_query(F.data == "grp:my_att")
+async def btn_my_attendance_legacy(callback: CallbackQuery, conn) -> None:
+    """Старое значение callback кнопки «📊 Моя посещаемость».
+
+    Кнопка жила в «Моей группе» и вела на ``grp:my_att``; после переезда в
+    «Профиль» она стала ``profile:my_attendance``. Сообщения, отправленные
+    раньше, всё ещё несут старый callback — нажатие по ним должно работать,
+    а не молчать.
+    """
+    if callback.message is not None:
+        await att_marks.send_my_attendance(callback.message, conn,
+                                           callback.from_user.id)
     await callback.answer()
 
 

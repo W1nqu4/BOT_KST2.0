@@ -17,7 +17,7 @@ from bot.db import transaction
 
 def mark_attendance(conn: sqlite3.Connection, group_name: str, date_iso: str,
                     para: int, tg_id: int, full_name: str, status: str,
-                    marked_by: int, method: str,
+                    marked_by: int, method: str, subject: str | None = None,
                     now: str | None = None) -> None:
     """Поставить или обновить отметку студента.
 
@@ -35,22 +35,27 @@ def mark_attendance(conn: sqlite3.Connection, group_name: str, date_iso: str,
         status: ``present`` | ``late`` | ``absent`` | ``excused``.
         marked_by: кто поставил отметку.
         method: ``self`` | ``starosta`` | ``vote``.
+        subject: название предмета на момент отметки (может быть None, если
+            расписание недоступно — тогда предмет подтянется из кэша позже).
         now: момент в ISO (для тестов).
     """
     with transaction(conn):
         conn.execute(
             "INSERT INTO attendance"
             " (group_name, date_iso, para, tg_id, full_name, status,"
-            "  marked_by, marked_at, method)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+            "  marked_by, marked_at, method, subject)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
             " ON CONFLICT(group_name, date_iso, para, tg_id) DO UPDATE SET"
             "   status = excluded.status,"
             "   full_name = excluded.full_name,"
             "   marked_by = excluded.marked_by,"
             "   marked_at = excluded.marked_at,"
-            "   method = excluded.method",
+            "   method = excluded.method,"
+            # Неизвестный предмет (None) не должен затирать уже сохранённый:
+            # расписание могло не загрузиться в момент повторной отметки.
+            "   subject = COALESCE(excluded.subject, attendance.subject)",
             (group_name, date_iso, para, tg_id, full_name, status,
-             marked_by, now or _now(), method),
+             marked_by, now or _now(), method, subject),
         )
 
 

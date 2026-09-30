@@ -14,6 +14,8 @@ from bot.attendance.models import (
     STATUS_LATE,
     STATUS_PRESENT,
 )
+from bot.config import MIN_ATTESTATION_LESSONS
+from bot.utils.text import plural_ru
 
 # Иконки статусов: единый язык во всех экранах.
 STATUS_ICONS = {
@@ -122,21 +124,32 @@ def render_poll_final(group: str, subject: str, day, para: int,
 
     return "\n".join(lines)
 def render_my_attendance(month_title: str, counts: dict,
-                         by_subject: list[dict]) -> str:
-    """Сводка «Моя посещаемость» за месяц.
+                         by_subject: list[dict],
+                         attestation: dict | None = None,
+                         group: str = "") -> str:
+    """Сводка «Моя посещаемость» за месяц с блоком аттестации.
 
     Args:
-        month_title: заголовок месяца («Сентябрь 2026»).
+        month_title: заголовок месяца («Октябрь 2026»).
         counts: ``{status: количество}``.
-        by_subject: ``[{'subject': ..., 'present': N, 'total': M}]``.
+        by_subject: ``[{'subject', 'present', 'total'}]`` (оставлено для
+            совместимости с прежним вызовом; в новом макете не выводится).
+        attestation: результат
+            :func:`bot.attendance.attestation_service.get_attestation_summary`
+            или None — тогда блок аттестации не показывается.
+        group: группа для шапки («25КАД»).
 
     Returns:
         HTML-текст сообщения.
     """
+    header = "📊 <b>Моя посещаемость</b>"
+    if group:
+        header += f"\n🎓 {escape(group)} · {escape(month_title)}"
+    else:
+        header += f"\n🎓 {escape(month_title)}"
+
     lines = [
-        "📊 <b>Моя посещаемость</b>",
-        "",
-        f"📅 {escape(month_title)}",
+        header,
         "",
         f"{STATUS_ICONS[STATUS_PRESENT]} Присутствовал: "
         f"<b>{counts.get(STATUS_PRESENT, 0)}</b>",
@@ -148,15 +161,50 @@ def render_my_attendance(month_title: str, counts: dict,
         f"<b>{counts.get(STATUS_EXCUSED, 0)}</b>",
     ]
 
-    if by_subject:
-        lines.extend(["", "По предметам:"])
-        for item in by_subject:
-            lines.append(
-                f"• {escape(str(item['subject']))}: "
-                f"{item['present']}/{item['total']} "
-                f"{STATUS_ICONS[STATUS_PRESENT]}"
-            )
+    if attestation and attestation.get("items"):
+        lines.extend(["", "━━━━━━━━━━━━━━━━", ""])
+        lines.extend(render_attestation_block(attestation))
+
     return "\n".join(lines)
+
+
+def render_attestation_block(attestation: dict) -> list[str]:
+    """Строки блока «Аттестация по предметам».
+
+    Args:
+        attestation: результат ``get_attestation_summary``.
+
+    Returns:
+        Список строк (без завершающего перевода строки).
+
+    Note:
+        Порог берётся из :data:`bot.config.MIN_ATTESTATION_LESSONS`, а не из
+        результата: в подписи нужен именно порог, а не «сколько не хватает»
+        (последнее уже посчитано по каждому предмету отдельно).
+    """
+    threshold = MIN_ATTESTATION_LESSONS
+    lines = [
+        "⚠️ <b>Аттестация по предметам</b>",
+        f"<i>Минимум {threshold} "
+        f"{plural_ru(threshold, 'пара', 'пары', 'пар')} "
+        f"по предмету за месяц</i>",
+        "",
+    ]
+
+    for item in attestation["items"]:
+        attended = int(item["attended"])
+        subject = escape(str(item["subject"]))
+
+        if item["is_attested"]:
+            lines.append(f"✅ {subject} — {attended}/{threshold}")
+        elif attended:
+            lines.append(
+                f"⚠️ {subject} — {attended}/{threshold} "
+                f"(нужно ещё {item['need_more']})"
+            )
+        else:
+            lines.append(f"❌ {subject} — 0/{threshold}")
+    return lines
 
 
 def render_day_attendance(day, rows: list[dict]) -> str:
@@ -184,7 +232,8 @@ def render_day_attendance(day, rows: list[dict]) -> str:
 
 
 def render_week_report(group: str, week_title: str, truants: list[dict],
-                       good: list[str]) -> str:
+                       good: list[str],
+                       attestation: dict | None = None) -> str:
     """Отчёт за неделю для старосты.
 
     Args:
@@ -192,6 +241,9 @@ def render_week_report(group: str, week_title: str, truants: list[dict],
         week_title: «23-29 сентября».
         truants: ``[{'full_name': ..., 'absent': N}]`` — прогульщики.
         good: ФИО с отличной посещаемостью.
+        attestation: результат
+            :func:`bot.attendance.attestation_service.get_group_attestation_report`
+            или None — тогда блоки аттестации не показываются.
 
     Returns:
         HTML-текст сообщения.
@@ -200,23 +252,90 @@ def render_week_report(group: str, week_title: str, truants: list[dict],
         f"📊 <b>Отчёт за неделю ({escape(week_title)})</b>",
         f"🎓 {escape(group)}",
         "",
-        "🔴 <b>Прогулы:</b>",
     ]
+
+    at_risk = (attestation or {}).get("at_risk") or []
+    excellent = (attestation or {}).get("excellent") or []
+
+    if at_risk:
+        lines.append("🔴 <b>Под угрозой неаттестации:</b>")
+        for item in at_risk:
+            lines.append(f"  • {escape(str(item['full_name']))} — "
+                         f"{_format_risks(item['subjects'])}")
+        lines.append("")
+
+    if excellent:
+        lines.append("✅ <b>Отличная посещаемость:</b>")
+        for item in excellent:
+            lines.append(f"  • {escape(str(item['full_name']))} — "
+                         f"все предметы ✅")
+        lines.append("")
+
+    lines.append("🔴 <b>Прогулы:</b>")
     if truants:
         for item in truants:
+            absent = int(item["absent"])
+            word = plural_ru(absent, "пара", "пары", "пар")
             lines.append(
-                f"  • {escape(str(item['full_name']))} — {item['absent']} пар"
+                f"  • {escape(str(item['full_name']))} — {absent} {word}"
             )
     else:
         lines.append("  <i>нет</i>")
 
-    lines.extend(["", "✅ <b>Отличная посещаемость:</b>"])
+    lines.extend(["", "✅ <b>Отличная посещаемость за неделю:</b>"])
     if good:
         for name in good:
             lines.append(f"  • {escape(name)}")
     else:
         lines.append("  <i>пока никого</i>")
 
+    return "\n".join(lines)
+
+
+def _format_risks(subjects: list[dict]) -> str:
+    """Сжать проблемные предметы в строку: «История 2/3, Литература 1/3».
+
+    Нужно отчёту старосты: по каждому студенту видно, где именно он
+    проседает по аттестации, но всё в одну строку — иначе отчёт группы
+    распухает на пол-экрана.
+    """
+    threshold = MIN_ATTESTATION_LESSONS
+    parts = []
+    for item in subjects:
+        subject = escape(str(item["subject"]))
+        if int(item["attended"]) == 0:
+            parts.append(f"{subject} 0/{threshold}")
+        else:
+            parts.append(f"{subject} {item['attended']}/{threshold}")
+    return ", ".join(parts)
+
+
+def render_truant_attestation(subjects: list[dict]) -> str:
+    """Блок «Под угрозой неаттестации» для личного предупреждения.
+
+    Args:
+        subjects: ``at_risk`` из ``get_attestation_summary``.
+
+    Returns:
+        HTML-блок строк или пустая строка, если проблем нет.
+    """
+    if not subjects:
+        return ""
+
+    threshold = MIN_ATTESTATION_LESSONS
+    # Пустая строка перед блоком: предупреждение о прогулах заканчивается
+    # ссылкой на /my_attendance, и блок аттестации должен идти отдельно.
+    lines = ["", "", "⚠️ <b>Под угрозой неаттестации:</b>"]
+    for item in subjects:
+        attended = int(item["attended"])
+        subject = escape(str(item["subject"]))
+        if attended:
+            lines.append(
+                f"• {subject} — {attended}/{threshold} "
+                f"(нужно ещё {item['need_more']})"
+            )
+        else:
+            lines.append(f"• {subject} — 0/{threshold}")
     return "\n".join(lines)
 
 

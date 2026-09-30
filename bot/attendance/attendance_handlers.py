@@ -18,6 +18,7 @@ from datetime import date, datetime
 from html import escape
 
 from aiogram import F, Router
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandObject
 from aiogram.types import CallbackQuery, Message
 
@@ -25,7 +26,9 @@ from bot.attendance import attendance_db as att
 from bot.attendance import attendance_keyboards as att_kb
 from bot.attendance import attendance_service as att_svc
 from bot.attendance import attendance_texts as atext
+from bot.attendance import attestation_service as atts
 from bot.attendance import db as att_db
+from bot.attendance import keyboards as kb
 from bot.config import KRASNOYARSK
 
 logger = logging.getLogger(__name__)
@@ -178,31 +181,86 @@ async def open_mark(callback: CallbackQuery, conn) -> None:
 
 @router.message(Command("my_attendance"))
 async def cmd_my_attendance(message: Message, conn) -> None:
-    """``/my_attendance`` — сводка посещаемости за текущий месяц."""
-    tg_id = _tg_id(message)
+    """``/my_attendance`` — сводка посещаемости за текущий месяц.
+
+    Команда остаётся алиасом: тот же рендер, что у кнопки «📊 Моя
+    посещаемость» в «Профиле».
+    """
+    await send_my_attendance(message, conn, _tg_id(message), offset=0)
+
+
+async def send_my_attendance(message: Message, conn, tg_id: int,
+                             offset: int = 0, edit: bool = False) -> None:
+    """Показать экран «Моя посещаемость» за месяц.
+
+    Args:
+        message: сообщение (или ``callback.message``), куда отвечать.
+        conn: соединение SQLite.
+        tg_id: студент.
+        offset: 0 — текущий месяц, -1 — прошлый.
+        edit: True — переписать текущее сообщение, а не отправлять новое
+            (для кнопок «Обновить» и «Прошлый месяц»).
+    """
     student = att_db.get_student(conn, tg_id)
     if student is None:
         await message.answer(atext.NEED_GROUP, parse_mode="HTML")
         return
 
-    summary = att_svc.student_month_summary(conn, tg_id)
-    if not any(summary["counts"].values()):
+    group = str(student["group_name"])
+    period_start, period_end = atts.period_for_month(offset_months=offset)
+
+    summary = att_svc.month_summary_for_period(conn, tg_id, group,
+                                               period_start, period_end)
+    attestation = atts.get_attestation_summary(conn, tg_id, group,
+                                              period_start, period_end)
+
+    if not any(summary["counts"].values()) and not attestation["items"]:
         await message.answer(atext.NO_ATTENDANCE_YET, parse_mode="HTML")
         return
 
-    await message.answer(
-        atext.render_my_attendance(summary["month_title"], summary["counts"],
-                                   summary["by_subject"]),
-        parse_mode="HTML",
-        reply_markup=att_kb.my_attendance_kb(),
+    text = atext.render_my_attendance(
+        summary["month_title"], summary["counts"], summary["by_subject"],
+        attestation=attestation, group=group,
     )
+    keyboard = kb.my_attendance_period_kb(offset)
+
+    if edit:
+        try:
+            await message.edit_text(text, parse_mode="HTML",
+                                    reply_markup=keyboard)
+            return
+        except TelegramBadRequest:
+            # Сообщение слишком старое или уже изменилось — шлём новое.
+            logger.debug("could not edit attendance screen", exc_info=True)
+    await message.answer(text, parse_mode="HTML", reply_markup=keyboard)
+
+
+@router.callback_query(F.data.startswith(kb.CB_ATT_PERIOD_PREFIX))
+async def cb_attendance_period(callback: CallbackQuery, conn) -> None:
+    """``att:per:{offset}`` — «Обновить» и «Прошлый месяц»."""
+    raw = (callback.data or "").removeprefix(kb.CB_ATT_PERIOD_PREFIX)
+    try:
+        offset = int(raw)
+    except ValueError:
+        await callback.answer()
+        return
+
+    if callback.message is not None:
+        await send_my_attendance(callback.message, conn, callback.from_user.id,
+                                 offset=offset, edit=True)
+    await callback.answer()
 
 
 @router.callback_query(F.data == att_kb.CB_MY)
 async def cb_my_attendance(callback: CallbackQuery, conn) -> None:
-    """Кнопка «📊 Моя посещаемость» из «Моя группа»."""
+    """Кнопка «📊 Моя посещаемость» из старых сообщений (``att:my``).
+
+    Основной вход — ``profile:my_attendance`` из «Профиля» (обработчик в
+    :mod:`bot.attendance.handlers`), здесь только совместимость: сообщения,
+    отправленные до переезда кнопки, несут callback ``att:my``.
+    """
     if callback.message is not None:
-        await cmd_my_attendance(callback.message, conn)
+        await send_my_attendance(callback.message, conn, callback.from_user.id)
     await callback.answer()
 
 
@@ -356,18 +414,57 @@ async def cmd_report_week(message: Message, conn) -> None:
 
 
 async def send_week_report(message: Message, conn, group: str) -> None:
-    """Отправить отчёт за неделю (общий код для команды и кнопки)."""
+    """Отправить отчёт за неделю (общий код для команды и кнопки).
+
+    В отчёт добавлен блок аттестации за текущий месяц: старосте нужно видеть
+    не только прогулы за неделю, но и кто рискует не получить аттестацию.
+    """
     report = att_svc.group_week_report(conn, group)
-    if not report["truants"] and not report["good"]:
+    attestation = atts.get_group_attestation_report(
+        conn, group, *atts.period_for_month(offset_months=0)
+    )
+
+    if (not report["truants"] and not report["good"]
+            and not attestation["at_risk"] and not attestation["excellent"]):
         await message.answer(atext.NO_REPORT_DATA, parse_mode="HTML")
         return
 
     await message.answer(
         atext.render_week_report(group, report["week_title"],
-                                 report["truants"], report["good"]),
+                                 report["truants"], report["good"],
+                                 attestation=attestation),
         parse_mode="HTML",
-        reply_markup=att_kb.my_attendance_kb(),
+        reply_markup=kb.week_report_kb(),
     )
+
+
+@router.callback_query(F.data == kb.CB_WEEK_REFRESH)
+async def cb_week_refresh(callback: CallbackQuery, conn) -> None:
+    """«🔄 Обновить» в отчёте за неделю — пересчитать и переписать."""
+    tg_id = _cb_tg_id(callback)
+    if not is_group_admin(conn, tg_id):
+        await callback.answer(atext.MANAGE_DENIED, show_alert=True)
+        return
+
+    student = att_db.get_student(conn, tg_id)
+    if student is None or callback.message is None:
+        await callback.answer()
+        return
+
+    group = str(student["group_name"])
+    report = att_svc.group_week_report(conn, group)
+    attestation = atts.get_group_attestation_report(
+        conn, group, *atts.period_for_month(offset_months=0)
+    )
+    text = atext.render_week_report(group, report["week_title"],
+                                    report["truants"], report["good"],
+                                    attestation=attestation)
+    try:
+        await callback.message.edit_text(text, parse_mode="HTML",
+                                         reply_markup=kb.week_report_kb())
+    except TelegramBadRequest:
+        logger.debug("could not edit week report", exc_info=True)
+    await callback.answer()
 
 
 @router.callback_query(F.data.startswith(att_kb.CB_REQUEST_PREFIX))

@@ -23,7 +23,7 @@ CB_ENTER_CODE = "grp:enter_code"
 CB_CREATE = "grp:create"
 CB_PICK_GROUP_PREFIX = "grp:pick:"     # grp:pick:25КАД
 CB_MARK = "grp:mark"
-CB_MY_ATTENDANCE = "grp:my_att"
+CB_MY_ATTENDANCE = "profile:my_attendance"   # экран живёт в «Профиле»
 CB_LIST = "grp:list"
 CB_MANAGE = "grp:manage"
 CB_MARK_MANUAL = "grp:mark_manual"
@@ -34,6 +34,11 @@ CB_MAKE_DEPUTY = "grp:make_deputy"
 CB_DEPUTY_PREFIX = "grp:deputy:"       # grp:deputy:{tg_id}
 CB_BACK = "grp:back"
 CB_MENU = "menu:home"
+
+# Возврат в «Профиль» из вложенных экранов и листание месяцев сводки.
+CB_PROFILE_BACK = "profile:back"
+CB_ATT_PERIOD_PREFIX = "att:per:"      # att:per:0 — текущий, att:per:-1 — прошлый
+CB_WEEK_REFRESH = "att:week_refresh"   # 🔄 Обновить в /report_week
 
 # Заглушки этапа 2 (кнопки есть, ответ — «скоро»).
 # Кнопки «Моя группа». Заглушек больше нет: все ведут в реальные обработчики
@@ -77,12 +82,17 @@ def my_group_not_registered_kb() -> InlineKeyboardMarkup:
 
 
 def my_group_student_kb() -> InlineKeyboardMarkup:
-    """Плитки студента: отметка и своя посещаемость (этап 2), список, меню."""
+    """Плитки студента: отметка на паре, список группы, меню.
+
+    «📊 Моя посещаемость» переехала в «Профиль» (она не про текущую группу,
+    а про личную статистику за месяц), поэтому здесь её больше нет.
+
+    Returns:
+        InlineKeyboardMarkup с тремя кнопками.
+    """
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✏️ Отметиться на паре",
                               callback_data=CB_MARK)],
-        [InlineKeyboardButton(text="📊 Моя посещаемость",
-                              callback_data=CB_MY_ATTENDANCE)],
         [InlineKeyboardButton(text="📋 Список группы", callback_data=CB_LIST)],
         [InlineKeyboardButton(text="🏠 Меню", callback_data=CB_MENU)],
     ])
@@ -115,19 +125,83 @@ def group_management_kb() -> InlineKeyboardMarkup:
 
 
 def profile_inline_kb() -> InlineKeyboardMarkup:
-    """Профиль: БЕЗ кнопки «Отметиться» (отметка живёт в «Моя группа»).
+    """Профиль: личные разделы пользователя.
+
+    «📊 Моя посещаемость» пришла сюда из «Моей группы»: это личная статистика
+    за месяц (с блоком аттестации), а не действие с группой. «Отметиться»
+    осталось в «Моей группе» — оно про текущую пару.
+
+    Layout:
+        [✏️ Изменить данные]
+        [📊 Моя посещаемость]
+        [📆 Интеграция с календарём]
+        [🐛 Сообщить о проблеме]
+        [🏠 Меню]
 
     Returns:
-        InlineKeyboardMarkup: изменить данные, календарь, обратная связь, меню.
+        InlineKeyboardMarkup с пятью кнопками.
     """
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✏️ Изменить данные",
                               callback_data="profile:edit")],
+        [InlineKeyboardButton(text="📊 Моя посещаемость",
+                              callback_data=CB_MY_ATTENDANCE)],
         [InlineKeyboardButton(text="📆 Интеграция с календарём",
                               callback_data="profile:calendar")],
         [InlineKeyboardButton(text="🐛 Сообщить о проблеме",
                               callback_data="profile:feedback")],
         [InlineKeyboardButton(text="🏠 Меню", callback_data=CB_MENU)],
+    ])
+
+
+def my_attendance_period_kb(offset: int = 0) -> InlineKeyboardMarkup:
+    """Кнопки под экраном «Моя посещаемость».
+
+    Layout:
+        [🔄 Обновить]  [📅 Прошлый месяц]
+        [🔙 Назад]     [🏠 Главное меню]
+
+    «📅 Прошлый месяц» показывается только для текущего месяца: на экране
+    прошлого месяца листать некуда (истории глубже месяца нет).
+
+    Args:
+        offset: 0 — текущий месяц, -1 — прошлый.
+
+    Returns:
+        InlineKeyboardMarkup с двумя или тремя кнопками.
+    """
+    top = [InlineKeyboardButton(text="🔄 Обновить",
+                                callback_data=f"{CB_ATT_PERIOD_PREFIX}{offset}")]
+    if offset == 0:
+        top.append(InlineKeyboardButton(
+            text="📅 Прошлый месяц",
+            callback_data=f"{CB_ATT_PERIOD_PREFIX}-1",
+        ))
+    return InlineKeyboardMarkup(inline_keyboard=[
+        top,
+        [
+            InlineKeyboardButton(text="🔙 Назад",
+                                 callback_data=CB_PROFILE_BACK),
+            InlineKeyboardButton(text="🏠 Главное меню",
+                                 callback_data=CB_MENU),
+        ],
+    ])
+
+
+def week_report_kb() -> InlineKeyboardMarkup:
+    """Кнопки под отчётом за неделю для старосты.
+
+    Layout:
+        [🔄 Обновить]
+        [🏠 Главное меню]
+
+    Returns:
+        InlineKeyboardMarkup с двумя кнопками.
+    """
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔄 Обновить",
+                              callback_data=CB_WEEK_REFRESH)],
+        [InlineKeyboardButton(text="🏠 Главное меню", callback_data=CB_MENU)],
     ])
 
 

@@ -38,7 +38,8 @@ HELP_TEXT = (
     "• Ищет ближайшие пары по предмету («📚 Предметы» внутри расписания)\n"
     "• Ведёт твои дедлайны с напоминаниями\n"
     "• Даёт подписку на .ics-календарь (Google / Apple)\n"
-    "• Группа и посещаемость: код от старосты, список группы\n\n"
+    "• Группа и посещаемость: код от старосты, список группы\n"
+    "🔔 За 5 минут до пары — напоминание с предметом и кабинетом\n\n"
     "<b>Команды</b>\n"
     "/start — начать, сменить группу\n"
     "/setup_schedule — указать группу для расписания\n"
@@ -127,10 +128,36 @@ async def cb_settings_toggle(callback: CallbackQuery, conn) -> None:
     await callback.answer("Уведомления включены" if enabled else "Уведомления выключены")
 
 
+async def _profile_text(conn, tg_id: int) -> str:
+    """Собрать текст «Профиля».
+
+    Вынесено из обработчика: профиль рисуется и по кнопке «👤 Профиль», и при
+    возврате «🔙 Назад» с экрана посещаемости — текст обязан совпадать.
+
+    Args:
+        conn: соединение SQLite.
+        tg_id: пользователь.
+
+    Returns:
+        HTML-текст профиля.
+    """
+    from bot.services import deadline_service
+
+    group = db.get_user_group(conn, tg_id)
+    deadlines = deadline_service.list_active(conn, tg_id)
+    notifications = db.get_notifications_enabled(conn, tg_id)
+    return (
+        "👤 <b>Профиль</b>\n\n"
+        f"🎓 Группа: <b>{escape(group or 'не выбрана')}</b>\n"
+        f"📝 Активных дедлайнов: <b>{len(deadlines)}</b>\n"
+        f"🔔 Уведомления: <b>{'включены' if notifications else 'выключены'}</b>\n\n"
+        "Подпишись на календарь — расписание появится в телефоне само."
+    )
+
+
 @router.message(F.text == reply_kb.BTN_PROFILE)
 async def btn_profile(message: Message, conn, settings, state: FSMContext) -> None:
-    """Профиль: группа, число дедлайнов и вход в интеграцию с календарём."""
-    from bot.services import deadline_service
+    """Профиль: группа, посещаемость, дедлайны и интеграция с календарём."""
     from bot.state import SCREEN_PROFILE, set_last_screen
 
     tg_id = message.from_user.id if message.from_user else 0
@@ -143,17 +170,10 @@ async def btn_profile(message: Message, conn, settings, state: FSMContext) -> No
         return
 
     await set_last_screen(state, SCREEN_PROFILE)
-    deadlines = deadline_service.list_active(conn, tg_id)
-    notifications = db.get_notifications_enabled(conn, tg_id)
-    text = (
-        "👤 <b>Профиль</b>\n\n"
-        f"🎓 Группа: <b>{escape(group)}</b>\n"
-        f"📝 Активных дедлайнов: <b>{len(deadlines)}</b>\n"
-        f"🔔 Уведомления: <b>{'включены' if notifications else 'выключены'}</b>\n\n"
-        "Подпишись на календарь — расписание появится в телефоне само."
+    await message.answer(
+        await _profile_text(conn, tg_id), parse_mode="HTML",
+        reply_markup=att_kb.profile_inline_kb(),
     )
-    kb = att_kb.profile_inline_kb()
-    await message.answer(text, parse_mode="HTML", reply_markup=kb)
 
 
 @router.callback_query(F.data == "profile:edit")
@@ -173,6 +193,31 @@ async def cb_profile_edit(callback: CallbackQuery, state: FSMContext) -> None:
             "<code>26КАД</code>):",
             parse_mode="HTML",
         )
+    await callback.answer()
+
+
+@router.callback_query(F.data == att_kb.CB_PROFILE_BACK)
+async def cb_profile_back(callback: CallbackQuery, conn, settings,
+                          state: FSMContext) -> None:
+    """«🔙 Назад» с экрана посещаемости — вернуться в «Профиль».
+
+    Профиль перерисовывается тем же кодом, что и кнопка «👤 Профиль», поэтому
+    тексты и клавиатура не разъезжаются.
+    """
+    from bot.attendance import keyboards as att_kb_local
+
+    if callback.message is None:
+        await callback.answer()
+        return
+
+    text = await _profile_text(conn, callback.from_user.id)
+    try:
+        await callback.message.edit_text(
+            text, parse_mode="HTML",
+            reply_markup=att_kb_local.profile_inline_kb(),
+        )
+    except Exception:
+        logger.debug("could not edit profile", exc_info=True)
     await callback.answer()
 
 

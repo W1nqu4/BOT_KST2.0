@@ -66,3 +66,24 @@ def migrate_11_attendance_marks(conn: sqlite3.Connection) -> None:
     conn.execute(CREATE_ATTENDANCE_TG_ID_INDEX)
     conn.execute(CREATE_ATTENDANCE_POLLS)
     conn.execute(CREATE_ATTENDANCE_POLLS_GROUP_INDEX)
+
+
+def migrate_12_attendance_subject(conn: sqlite3.Connection) -> None:
+    """Миграция 11 → 12: колонка ``subject`` в ``attendance``.
+
+    Предмет сохраняется в самой отметке, потому что расписание может
+    измениться (замена, новая версия DOCX), а сводка аттестации должна
+    считать пары по тем предметам, которые были в момент отметки.
+
+    Колонка nullable: у записей, сделанных до этой миграции, предмета нет —
+    для них работает fallback по ``schedule_cache`` (см.
+    :func:`bot.attendance.attestation_service.subject_for_mark`).
+
+    Повторный ``ALTER TABLE ADD COLUMN`` упал бы с ``duplicate column name``,
+    поэтому сначала проверяем состав колонок.
+    """
+    columns = {str(row["name"]) for row in conn.execute(
+        "PRAGMA table_info(attendance)"
+    )}
+    if "subject" not in columns:
+        conn.execute("ALTER TABLE attendance ADD COLUMN subject TEXT")

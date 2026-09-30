@@ -22,6 +22,7 @@ from collections.abc import Callable
 from bot.attendance.migrations import (
     migrate_10_attendance_groups,
     migrate_11_attendance_marks,
+    migrate_12_attendance_subject,
 )
 from bot.db import transaction
 
@@ -353,6 +354,7 @@ MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     9: migrate_9_group_chat_pin,
     10: migrate_10_attendance_groups,
     11: migrate_11_attendance_marks,
+    12: migrate_12_attendance_subject,
 }
 
 
