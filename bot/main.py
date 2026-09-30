@@ -64,6 +64,7 @@ BOT_COMMANDS: tuple[BotCommand, ...] = (
     BotCommand(command="unsync", description="Отвязать чат от группы"),
     BotCommand(command="schedule", description="Расписание на сегодня в чат"),
     BotCommand(command="mygroup", description="Моя группа и посещаемость"),
+    BotCommand(command="teacher", description="Расписание преподавателя"),
 )
 
 

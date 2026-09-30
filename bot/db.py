@@ -203,6 +203,116 @@ def list_available_groups(conn: sqlite3.Connection) -> list[str]:
     return [str(row["group_name"]) for row in rows]
 
 
+def split_teacher_cell(value: str) -> list[str]:
+    """Разобрать ячейку преподавателей на отдельные ФИО.
+
+    В расписании у подгрупп в одной ячейке стоит несколько человек через
+    запятую («Ващенко Марина Юрьевна, Лоза Алена Станиславовна»), поэтому
+    ячейка — не одно ФИО, а список.
+
+    Args:
+        value: содержимое колонки ``teacher``.
+
+    Returns:
+        Список ФИО без пустых значений (порядок сохраняется).
+    """
+    return [
+        part.strip() for part in str(value or "").split(",") if part.strip()
+    ]
+
+
+def _normalize_person(text: str) -> str:
+    """Ключ сравнения ФИО: нижний регистр и ё→е.
+
+    SQLite не сравнивает кириллицу регистронезависимо (``LIKE '%Лунева%'``
+    находит ноль строк, хотя в расписании «Лунёва»), поэтому поиск идёт в
+    Python по этому ключу, а не через ``LIKE``.
+
+    Args:
+        text: ФИО или запрос.
+
+    Returns:
+        Нормализованная строка для сравнения.
+    """
+    return str(text or "").strip().lower().replace("ё", "е")
+
+
+def _all_teacher_names(conn: sqlite3.Connection) -> list[str]:
+    """Все преподаватели: справочник плюс встречающиеся в расписании.
+
+    Справочник нужен, чтобы фамилия находилась и тогда, когда пар у человека
+    нет (тогда показываем «нет пар», а не «не нашёл»); кэш — чтобы находились
+    те, кого в справочнике ещё нет.
+
+    Returns:
+        Отсортированный список полных ФИО без «вакансии» (это не человек).
+    """
+    from bot.parsers.teachers import TEACHERS
+
+    names = set(TEACHERS.values())
+    rows = conn.execute(
+        "SELECT DISTINCT teacher FROM schedule_cache WHERE teacher <> ''"
+    ).fetchall()
+    for row in rows:
+        names.update(split_teacher_cell(row["teacher"]))
+
+    return sorted(name for name in names if _normalize_person(name) != "вакансия")
+
+
+def find_teachers(conn: sqlite3.Connection, query: str) -> list[str]:
+    """Найти преподавателей по части ФИО.
+
+    Поиск по подстроке, регистронезависимый, с ё→е («лунева» находит
+    «Лунёва Ирина Владимировна»). Сравнение идёт по полному ФИО, поэтому
+    «Иван» найдёт и фамилии, и имена с отчествами.
+
+    Args:
+        conn: соединение SQLite.
+        query: то, что ввёл пользователь («Кудрявцева», «кудр», «лунева»).
+
+    Returns:
+        Отсортированный список полных ФИО; пустой, если совпадений нет.
+    """
+    needle = _normalize_person(query)
+    if not needle:
+        return []
+    return [
+        name for name in _all_teacher_names(conn)
+        if needle in _normalize_person(name)
+    ]
+
+
+def get_lessons_for_teacher(conn: sqlite3.Connection,
+                            teacher: str) -> list[dict]:
+    """Пары преподавателя из кэша расписания (все дни недели).
+
+    Сравнение ФИО идёт в Python: ``LIKE`` в SQLite не игнорирует регистр
+    кириллицы, поэтому «лунева» не нашла бы «Лунёва». Заодно корректно
+    разбираются ячейки с несколькими преподавателями у подгрупп.
+
+    Args:
+        conn: соединение SQLite.
+        teacher: полное ФИО (как в :func:`find_teachers`).
+
+    Returns:
+        Список словарей ``{group_name, day_of_week, para_number, subject,
+        teacher, room, week_type}``, отсортированный по дню недели, затем
+        по номеру пары. Пустой список, если пар нет.
+    """
+    target = _normalize_person(teacher)
+    rows = conn.execute(
+        "SELECT group_name, day_of_week, para_number, subject, teacher,"
+        " room, week_type FROM schedule_cache"
+        " ORDER BY day_of_week, para_number"
+    ).fetchall()
+
+    return [
+        dict(row) for row in rows
+        if any(_normalize_person(part) == target
+               for part in split_teacher_cell(row["teacher"]))
+    ]
+
+
 def count_users(conn: sqlite3.Connection) -> int:
     """Количество активных пользователей (для /stats на шаге 11)."""
     return int(

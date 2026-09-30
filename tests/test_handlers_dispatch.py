@@ -142,15 +142,16 @@ def test_bot_commands_declared() -> None:
     """set_my_commands получает команды чатов и посещаемости."""
     assert [c.command for c in BOT_COMMANDS] == [
         "start", "help", "settings", "setup", "unsync", "schedule", "mygroup",
+        "teacher",
     ]
 
 
 def test_dispatcher_includes_conn(dp, conn) -> None:
     """Диспетчер отдаёт хендлерам соединение БД."""
     assert dp.workflow_data["conn"] is conn
-    # 11 роутеров: добавились attendance (регистрация), attendance_marks
-    # (отметки) и attendance_admin.
-    assert len(all_routers()) == 11
+    # 12 роутеров: добавились attendance (регистрация), attendance_marks
+    # (отметки), attendance_admin и teacher (/teacher).
+    assert len(all_routers()) == 12
 
 
 async def test_start_shows_greeting_without_asking_group(

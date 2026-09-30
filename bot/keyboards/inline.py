@@ -325,3 +325,47 @@ def date_source_kb() -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="🔙 Назад", callback_data="dl:list"),
         ],
     ])
+# --- расписание преподавателя (/teacher) ---
+
+# Callback-данные раздела «Преподаватель».
+CB_TEACHER_AGAIN = "teacher:again"          # 📆 Другой преподаватель
+CB_TEACHER_PICK_PREFIX = "teacher:pick:"    # teacher:pick:{индекс}
+
+
+def teacher_pick_kb(names: list[str]) -> InlineKeyboardMarkup:
+    """Кнопки выбора преподавателя, когда совпадений несколько.
+
+    Индекс попадает в callback, а не само ФИО: фамилия с инициалами может
+    не влезть в 64 байта callback_data. Индекс сверяется со свежим списком
+    в обработчике — кнопка могла устареть.
+
+    Args:
+        names: полные ФИО из :func:`bot.db.find_teachers`.
+
+    Returns:
+        InlineKeyboardMarkup с кнопкой на каждого преподавателя.
+    """
+    rows = [
+        [InlineKeyboardButton(text=name[:60],
+                              callback_data=f"{CB_TEACHER_PICK_PREFIX}{index}")]
+        for index, name in enumerate(names)
+    ]
+    rows.append([InlineKeyboardButton(text="🏠 Меню", callback_data=CB_MENU)])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def teacher_detail_kb() -> InlineKeyboardMarkup:
+    """Кнопки под расписанием преподавателя.
+
+    Layout:
+        [📆 Другой преподаватель]
+        [🏠 Меню]
+
+    Returns:
+        InlineKeyboardMarkup с возвратом к поиску и в главное меню.
+    """
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📆 Другой преподаватель",
+                              callback_data=CB_TEACHER_AGAIN)],
+        [InlineKeyboardButton(text="🏠 Меню", callback_data=CB_MENU)],
+    ])
