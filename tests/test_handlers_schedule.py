@@ -195,15 +195,18 @@ async def test_set_group_then_typo_offers_suggestions(dp, conn) -> None:
 
 
 async def test_set_group_then_pick_suggestion_shows_schedule(dp, conn) -> None:
-    """Выбор подсказанной группы из расписания сразу показывает расписание."""
+    """Выбор подсказанной группы из расписания сохраняет её и показывает день."""
     bot = FakeBot()
 
     await dp.feed_update(bot, _callback(sched.CB_SET_GROUP))
     await dp.feed_update(bot, _update(TYPO))
+    bot.sent.clear()
     await dp.feed_update(bot, _callback(f"group:pick:{GROUP}"))
 
     assert db.get_user_group(conn, USER_ID) == GROUP
-    assert any(f"Группа: <b>{GROUP}</b>" in t for t in _texts(bot))
+    body = " ".join(_texts(bot))
+    assert "сохранена" in body
+    assert f"Группа: <b>{GROUP}</b>" in body, "расписание на сегодня"
 
 
 async def test_set_group_then_junk_input_prompts_again(dp, conn) -> None:

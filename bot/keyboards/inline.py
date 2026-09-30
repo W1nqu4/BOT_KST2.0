@@ -1,4 +1,4 @@
-"""Inline-клавиатуры: навигация по расписанию и выбор группы.
+﻿"""Inline-клавиатуры: навигация по расписанию и выбор группы.
 
 Callback-данные держим короткими и стабильными: они попадают в кнопки,
 которые уже отправлены пользователю, поэтому менять формат нельзя без
@@ -16,6 +16,18 @@ CB_TODAY = "sched:today"
 CB_PICK_DAY = "sched:pickday"
 CB_CHANGE_GROUP = "menu:changegroup"
 CB_MENU = "menu:home"             # 🏠 Меню: вернуть reply-клавиатуру
+
+# Выбор группы для расписания (без кода старосты) и пояснение разницы между
+# двумя способами. Константы живут здесь, а не в handlers/schedule.py: на них
+# ссылаются и расписание, и приветствие, и профиль — общий источник для всех.
+CB_SET_GROUP = "sched:setgroup"   # 🔢/📆 Указать группу → FSM ввода номера
+CB_HELP_CHOOSE = "help:choose"    # ℹ️ Что выбрать?
+
+# Вступление в группу посещаемости по коду старосты. Значение объявлено в
+# bot.attendance.keyboards, но продублировано строкой: импортировать пакет
+# посещаемости сюда — значит связать клавиатуры расписания с посещаемостью
+# ради одной константы.
+CB_ENTER_CODE = "grp:enter_code"
 
 # Callback-данные раздела «📚 Предметы» (внутри экрана расписания).
 CB_SUBJECTS = "subj:list"
@@ -119,6 +131,57 @@ def empty_subjects_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🔙 Назад", callback_data=CB_SUBJECT_BACK)],
         [InlineKeyboardButton(text="🏠 Меню", callback_data=CB_MENU)],
+    ])
+
+
+def greeting_kb() -> InlineKeyboardMarkup:
+    """Кнопки под приветствием: группа для расписания, код, пояснение.
+
+    Inline, а не reply: нижняя панель остаётся за главным меню, а этот выбор
+    нужен один раз при первом входе.
+
+    Layout:
+        [📆 Указать мою группу]
+        [📊 Ввести код старосты]
+        [ℹ️ Что выбрать?]
+
+    Returns:
+        InlineKeyboardMarkup с тремя кнопками.
+    """
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📆 Указать мою группу",
+                              callback_data=CB_SET_GROUP)],
+        [InlineKeyboardButton(text="📊 Ввести код старосты",
+                              callback_data=CB_ENTER_CODE)],
+        [InlineKeyboardButton(text="ℹ️ Что выбрать?",
+                              callback_data=CB_HELP_CHOOSE)],
+    ])
+
+
+def profile_no_group_kb() -> InlineKeyboardMarkup:
+    """Кнопки «Профиля» без группы — тот же выбор, что в расписании.
+
+    Layout:
+        [📆 Указать группу]
+        [📊 Ввести код старосты]
+        [🏠 Меню]
+
+    Returns:
+        InlineKeyboardMarkup с тремя кнопками.
+    """
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📆 Указать группу",
+                              callback_data=CB_SET_GROUP)],
+        [InlineKeyboardButton(text="📊 Ввести код старосты",
+                              callback_data=CB_ENTER_CODE)],
+        [InlineKeyboardButton(text="🏠 Меню", callback_data=CB_MENU)],
+    ])
+
+
+def choose_back_kb() -> InlineKeyboardMarkup:
+    """Возврат из пояснения «Что выбрать?» к исходному выбору."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔙 Назад", callback_data=CB_SET_GROUP)],
     ])
 
 

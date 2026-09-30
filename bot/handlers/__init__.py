@@ -17,6 +17,7 @@ from bot.handlers import calendar as calendar_handlers
 from bot.handlers import deadlines as deadlines_handlers
 from bot.handlers import feedback as feedback_handlers
 from bot.handlers import group_chats as group_chats_handlers
+from bot.handlers import group_input as group_input_handlers
 from bot.handlers import help as help_handlers
 from bot.handlers import schedule as schedule_handlers
 from bot.handlers import start as start_handlers
@@ -43,6 +44,11 @@ ROUTERS: tuple[Router, ...] = (
     feedback_handlers.router,
     admin_handlers.router,
     help_handlers.router,
+    # Свободный ввод группы — ПОСЛЕДНИМ. Фильтр F.text совпадает с любым
+    # текстом, и aiogram останавливается на первом сработавшем хендлере даже
+    # при `return` внутри: раньше в списке этот перехватчик отобрал бы
+    # сообщения у дедлайнов, обратной связи и остальных FSM-шагов.
+    group_input_handlers.router,
 )
 
 

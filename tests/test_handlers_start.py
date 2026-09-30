@@ -321,3 +321,57 @@ def test_render_day_missing_optional_fields() -> None:
     assert "⏰" not in text
     assert "ОД.07 Математика" in text
     assert start_h.suggest_groups("99XXX", ["26КАД", "26МЭГ"]) == []
+# --- регексп «похоже на номер группы» для свободного ввода ---
+
+def test_group_like_is_stricter_than_start_pattern() -> None:
+    """Свободный ввод требует цифру, а паттерн регистрации — нет.
+
+    Расхождение намеренное: в регистрации пользователь уже в режиме ввода
+    группы, а в свободном перехвате любой текст — это потенциальное сообщение
+    из другого сценария.
+    """
+    from bot.handlers import group_input
+
+    assert start_h.is_valid_group("КАД")          # регистрация: формат ок
+    assert not group_input.looks_like_group("КАД")  # свободный ввод: не группа
+    assert start_h.is_valid_group("25КАД")
+    assert group_input.looks_like_group("25КАД")
+
+
+def test_group_like_accepts_real_groups() -> None:
+    """Настоящие номера групп подходят под регексп свободного ввода."""
+    from bot.handlers import group_input
+
+    for raw in ("25КАД", "26КАД", "026КАД", "25-КАД", "26/1", "26С1",
+                "25 кад"):
+        assert group_input.looks_like_group(raw), raw
+
+
+def test_group_like_rejects_plain_text() -> None:
+    """Обычная речь не считается группой (иначе перехват съел бы всё).
+
+    Это и причина, по которой правило строже паттерна из ТЗ: тот пропускал
+    «привет», «спасибо», «да» — каждое сохранилось бы как имя группы.
+    """
+    from bot.handlers import group_input
+
+    for raw in ("привет", "как дела", "хочу расписание", "!", "a", "да",
+                "спасибо", "АБВГД", "26КАДДОПЕКСТРА", "мама мыла раму", ""):
+        assert not group_input.looks_like_group(raw), raw
+
+
+def test_group_like_requires_digit() -> None:
+    """Без цифры — не группа: группы КСТ всегда с номером."""
+    from bot.handlers import group_input
+
+    assert group_input.looks_like_group("25КАД")
+    assert not group_input.looks_like_group("КАД")
+
+
+def test_group_like_still_respects_length() -> None:
+    """Длина и состав символов по-прежнему ограничены."""
+    from bot.handlers import group_input
+
+    assert group_input.looks_like_group("26С1")
+    assert not group_input.looks_like_group("26КАДДОПЕКСТРА")
+    assert not group_input.looks_like_group("26!КАД")

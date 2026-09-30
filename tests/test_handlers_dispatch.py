@@ -149,24 +149,25 @@ def test_bot_commands_declared() -> None:
 def test_dispatcher_includes_conn(dp, conn) -> None:
     """Диспетчер отдаёт хендлерам соединение БД."""
     assert dp.workflow_data["conn"] is conn
-    # 13 роутеров: добавились attendance (регистрация), attendance_marks
-    # (отметки), attendance_vote (голосование), attendance_admin и teacher.
-    assert len(all_routers()) == 13
+    # 14 роутеров: добавились attendance (регистрация), attendance_marks
+    # (отметки), attendance_vote (голосование), attendance_admin, teacher
+    # и group_input (свободный ввод группы — подключается последним).
+    assert len(all_routers()) == 14
 
 
 async def test_start_shows_greeting_without_asking_group(
         dp, conn_with_groups) -> None:
-    """/start у нового пользователя: приветствие и меню, группа не спрошена.
+    """/start у нового пользователя: приветствие и выбор шага, не диктуем код.
 
-    Ввод группы для расписания перенесён в «📊 Моя группа» → настройка,
-    поэтому первый /start молчит про группу.
+    В приветствии предлагаются три пути (группа для расписания, код старосты,
+    пояснение), и ни один не назван обязательным.
     """
     bot = FakeBot()
     await dp.feed_update(bot, _update("/start"))
 
     texts = _texts(bot)
     assert any("Что я умею" in t for t in texts), "приветствие с описанием"
-    assert any("Моя группа" in t for t in texts)
+    assert any("Начни с одного из шагов" in t for t in texts)
     assert not any("Введи номер группы" in t for t in texts)
     assert db.get_user_group(conn_with_groups, USER_ID) is None
 

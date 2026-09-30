@@ -113,17 +113,25 @@ async def cb_setup_schedule(callback: CallbackQuery, state: FSMContext,
     await callback.answer()
 
 
-@router.message(GroupForm.waiting_group)
-async def process_group(message: Message, state: FSMContext, conn) -> None:
-    """Проверить введённую группу, сохранить и показать дашборд."""
-    raw = (message.text or "").strip()
-    if raw.startswith("/"):
-        await message.answer(
-            "Сначала выбери группу: напиши её номер, например <code>26КАД</code>.",
-            parse_mode="HTML",
-        )
-        return
+async def save_schedule_group(message: Message, conn, raw: str,
+                              from_schedule: bool = False) -> bool:
+    """Проверить введённый номер группы, сохранить и показать результат.
 
+    Общий путь для трёх входов: FSM-шаг ``waiting_group``, свободный ввод
+    текста в чате и «📆 Указать группу» из расписания/профиля. Логика одна:
+    нормализация → проверка формата → поиск по расписанию (fuzzy) → запись или
+    подсказка похожих.
+
+    Args:
+        message: сообщение, куда отвечать.
+        conn: соединение SQLite.
+        raw: то, что ввёл пользователь («25кад», «26 КАД»).
+        from_schedule: True — показывать расписание на сегодня сразу после
+            сохранения (вход был из раздела расписания), False — дашборд.
+
+    Returns:
+        True, если группа сохранена; False — если показана ошибка/подсказки.
+    """
     group = normalize_group_name(raw)
     available = db.list_available_groups(conn)
 
@@ -133,7 +141,7 @@ async def process_group(message: Message, state: FSMContext, conn) -> None:
             "Пример: <code>26КАД</code>. Попробуй ещё раз:",
             parse_mode="HTML",
         )
-        return
+        return False
 
     if available and group not in available:
         suggestions = suggest_groups(group, available)
@@ -147,29 +155,51 @@ async def process_group(message: Message, state: FSMContext, conn) -> None:
         else:
             text += "\nПроверь номер и напиши ещё раз."
             await message.answer(text, parse_mode="HTML")
-        return
+        return False
 
     db.update_user_group_only(
         conn, message.from_user.id if message.from_user else 0, group,
         message.from_user.full_name if message.from_user else "",
     )
-    from_schedule = bool((await state.get_data()).get("from_schedule"))
-    await state.clear()
-
     await message.answer(
         f"✅ Группа <b>{escape(group)}</b> сохранена.",
         parse_mode="HTML",
         reply_markup=reply_kb.main_kb(),
     )
+
     if from_schedule:
-        # Вход был из экрана «📆 Расписание» (кнопка «🔢 Указать группу») —
-        # сразу показываем расписание на сегодня, чтобы не заставлять жать
-        # кнопку повторно.
+        # Сразу показываем расписание на сегодня: пользователь пришёл за ним,
+        # заставлять жать кнопку ещё раз — лишний шаг.
         from bot.handlers.schedule import send_day
 
         await send_day(message, conn, group, date.today())
-        return
+        return True
+
     await send_dashboard(message, conn, group)
+    return True
+
+
+@router.message(GroupForm.waiting_group)
+async def process_group(message: Message, state: FSMContext, conn) -> None:
+    """Проверить введённую группу, сохранить и показать дашборд.
+
+    Состояние снимается ТОЛЬКО после успешного сохранения: при опечатке
+    показываются подсказки, и нажатие кнопки-подсказки должно ещё знать, что
+    пользователь пришёл из расписания (флаг ``from_schedule``).
+    """
+    raw = (message.text or "").strip()
+    if raw.startswith("/"):
+        await message.answer(
+            "Сначала выбери группу: напиши её номер, например <code>26КАД</code>.",
+            parse_mode="HTML",
+        )
+        return
+
+    from_schedule = bool((await state.get_data()).get("from_schedule"))
+    saved = await save_schedule_group(message, conn, raw,
+                                      from_schedule=from_schedule)
+    if saved:
+        await state.clear()
 
 
 @router.callback_query(F.data.startswith("group:pick:"))

@@ -139,11 +139,12 @@ def test_profile_kb_attendance_callback() -> None:
 
 
 def test_student_kb_has_no_my_attendance() -> None:
-    """«Моя посещаемость» убрана из «Моей группы» (студент)."""
+    """«Моя посещаемость» есть и в «Моей группе» (миграция 14)."""
     labels = [b.text for row in kb.my_group_student_kb().inline_keyboard
               for b in row]
-    assert "📊 Моя посещаемость" not in labels
-    assert labels == ["✏️ Отметиться на паре", "📋 Список группы", "🏠 Меню"]
+    assert "📊 Моя посещаемость" in labels
+    assert labels == ["✏️ Отметиться на паре", "📊 Моя посещаемость",
+                      "📋 Список группы", "🏠 Меню"]
 
 
 def test_starosta_kb_has_no_my_attendance() -> None:
@@ -247,27 +248,40 @@ async def test_attendance_report_lists_all_subjects(dp, conn) -> None:
 
 
 async def test_attendance_report_marks_attested(dp, conn) -> None:
-    """Аттестованный предмет помечен ✅, неаттестованный — ❌ или ⚠️.
-
-    Даты — понедельники текущего месяца (7, 14, 21 сентября 2026):
-    расписание группы заведено на понедельник, а период текущего месяца
-    считается «1 число → сегодня».
-    """
-    with transaction(conn):
-        for day in ("2026-09-07", "2026-09-14", "2026-09-21"):
-            conn.execute(
-                "INSERT INTO attendance (group_name, date_iso, para, tg_id,"
-                " full_name, status, marked_by, marked_at, method, subject)"
-                " VALUES (?, ?, 1, ?, 'Иванов И.И.', 'present', ?, 'x',"
-                " 'self', 'История')",
-                (GROUP, day, STUDENT, STUDENT),
-            )
+    """Экран содержит блок аттестации со всеми предметами группы."""
     bot = FakeBot()
 
     await _open_attendance(dp, bot)
 
     body = " ".join(_texts(bot))
-    assert "✅ История" in body
+    for subject in ("История", "Литература", "Физика"):
+        assert f"{subject} — 0/3" in body, "предмет показан даже без пар"
+
+
+def test_attestation_block_marks_attested_subject() -> None:
+    """Аттестованный предмет помечен ✅, не набравший — ⚠️ с остатком.
+
+    Проверяется рендер напрямую: считать отметки через БД пришлось бы от
+    текущей даты, и такой тест ломался бы первого числа каждого месяца.
+    """
+    from bot.attendance import attendance_texts as atext
+
+    lines = atext.render_attestation_block({
+        "items": [
+            {"subject": "История", "attended": 5, "total_lessons": 5,
+             "is_attested": True, "need_more": 0},
+            {"subject": "Литература", "attended": 2, "total_lessons": 4,
+             "is_attested": False, "need_more": 1},
+            {"subject": "Физика", "attended": 0, "total_lessons": 0,
+             "is_attested": False, "need_more": 3},
+        ],
+    })
+    text = "\n".join(lines)
+
+    assert "✅ История — 5/3" in text
+    assert "⚠️ Литература — 2/3 (нужно ещё 1)" in text
+    assert "❌ Физика — 0/3" in text
+    assert "Минимум 3 пары по предмету за месяц" in text
 
 
 async def test_prev_month_button_switches_period(dp, conn) -> None:
@@ -338,15 +352,15 @@ async def test_my_attendance_command_still_works(dp, conn) -> None:
     assert "Аттестация по предметам" in body
 
 
-async def test_student_kb_after_move_has_no_attendance(dp, conn) -> None:
-    """«📊 Моя группа» у студента больше не показывает посещаемость."""
+async def test_student_kb_shows_attendance_again(dp, conn) -> None:
+    """«📊 Моя группа» у студента снова показывает посещаемость."""
     bot = FakeBot()
 
     await dp.feed_update(bot, _update(kb.BTN_MY_GROUP))
 
     labels = " | ".join(_buttons(bot))
     assert "Отметиться на паре" in labels
-    assert "Моя посещаемость" not in labels
+    assert "Моя посещаемость" in labels
 
 
 async def test_attendance_without_group_prompts(dp, conn) -> None:
