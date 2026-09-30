@@ -1,4 +1,4 @@
-"""Логика посещаемости: пары, опросы, отметки, сводки (этап 2).
+﻿"""Логика посещаемости: пары, опросы, отметки, сводки (этап 2).
 
 Отдельно от :mod:`bot.attendance.service` (группы/роли, этап 1): здесь только
 посещаемость. SQL вынесен в :mod:`bot.attendance.attendance_db`, тексты — в
@@ -16,17 +16,26 @@
 from __future__ import annotations
 
 import logging
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
+
+from aiogram.exceptions import TelegramForbiddenError
 
 from bot import db as core_db
 from bot.attendance import attendance_db as att
 from bot.attendance import db as att_db
 from bot.attendance.models import (
     ALL_STATUSES,
+    CHECK_POLL_MINUTES,
     LATE_AFTER_MINUTES,
+    METHOD_AUTO,
     METHOD_SELF,
     METHOD_STAROSTA,
+    MODE_CHAT,
+    MODE_DIRECT,
+    POLL_TYPE_CHECK,
+    POLL_TYPE_SELF,
     STATUS_CYCLE,
+    STATUS_ABSENT,
     STATUS_PRESENT,
 )
 from bot.config import (
@@ -34,13 +43,20 @@ from bot.config import (
     BELL_TIMES_WEEKDAY,
     KRASNOYARSK,
 )
-from bot.services.schedule_service import get_lessons_for_day
+from bot.services.schedule_service import (
+    get_lessons_for_day,
+    time_range_for_date,
+)
 
 logger = logging.getLogger(__name__)
 
 # Насколько раньше начала пары считаем, что пара «идёт» (опрос уходит
 # в начале пары, поэтому окно симметричное).
 PARA_START_TOLERANCE_MINUTES = 5
+
+# Кто пометил отметку, поставленную ботом (автозакрытие опроса «Да/Нет»).
+# 0 — безопасный признак: настоящие Telegram-идентификаторы всегда больше нуля.
+MARKED_BY_BOT = 0
 
 
 def bells_for_day(day: date) -> dict:
@@ -246,10 +262,17 @@ def absent_students(conn, group: str, date_iso: str,
 
 async def start_poll(conn, bot, group: str, day: date, para: int,
                      force: bool = False) -> dict:
-    """Отправить в чат группы сообщение-опрос «кто на паре».
+    """Отправить опрос «Да/Нет» в начале пары (миграция 14).
 
-    Опрос уходит только в привязанный чат (``group_chats``): иначе слать
-    некуда, и студенты отмечаются через /attendance в личке.
+    Режим берётся из ``study_groups.attendance_mode`` и запоминается в самом
+    опросе:
+
+    - ``chat`` — одно сообщение в чат группы (редактируется при ответах);
+    - ``direct`` — отдельное сообщение каждому студенту в личку.
+
+    Окно — :data:`bot.attendance.models.CHECK_POLL_MINUTES` минут от начала
+    пары. Не ответившие получают ``absent`` при закрытии
+    (:func:`close_due_polls`).
 
     Args:
         conn: соединение SQLite.
@@ -262,15 +285,8 @@ async def start_poll(conn, bot, group: str, day: date, para: int,
     Returns:
         ``{'ok': bool, 'error': str | None, 'poll_id': int | None}``.
         ``error``: ``no_chat``, ``no_lesson``, ``already_exists``,
-        ``send_failed``.
+        ``no_students``, ``send_failed``.
     """
-    from bot.attendance import attendance_keyboards as att_kb
-    from bot.attendance import attendance_texts as atext
-
-    chat = group_chat_for(conn, group)
-    if chat is None:
-        return {"ok": False, "error": "no_chat", "poll_id": None}
-
     lesson = get_lesson_for_para(conn, group, day, para)
     if lesson is None:
         return {"ok": False, "error": "no_lesson", "poll_id": None}
@@ -279,19 +295,46 @@ async def start_poll(conn, bot, group: str, day: date, para: int,
     if att.poll_exists(conn, group, date_iso, para):
         return {"ok": False, "error": "already_exists", "poll_id": None}
 
-    end = para_end_time(day, para)
-    closes_at = (datetime.combine(day, end).replace(tzinfo=KRASNOYARSK)
-                 if end else datetime.now(KRASNOYARSK))
-    chat_id = int(chat["chat_id"])
+    mode = att_db.get_attendance_mode(conn, group)
+    subject = str(lesson["subject"])
+    time_range = time_range_for_date(para, day)
 
-    text = atext.render_poll(group, str(lesson["subject"]), day, para, [])
+    start = para_start_time(day, para)
+    # Окно опроса «Да/Нет» — 5 минут от начала пары. Раньше опрос ждал
+    # отметок до конца пары, потому что это была самопроверка.
+    closes = (datetime.combine(day, start).replace(tzinfo=KRASNOYARSK)
+              if start else datetime.now(KRASNOYARSK))
+    closes_at = closes + timedelta(minutes=CHECK_POLL_MINUTES)
+
+    if mode == MODE_DIRECT:
+        return await _start_direct_poll(conn, bot, group, day, para, subject,
+                                        time_range, closes_at, force=force)
+    return await _start_chat_poll(conn, bot, group, day, para, subject,
+                                  time_range, closes_at, force=force)
+
+
+async def _start_chat_poll(conn, bot, group: str, day: date, para: int,
+                           subject: str, time_range: str,
+                           closes_at: datetime, force: bool) -> dict:
+    """Опрос «Да/Нет» одним сообщением в чат группы."""
+    from bot.attendance import attendance_keyboards as att_kb
+    from bot.attendance import attendance_texts as atext
+
+    chat = group_chat_for(conn, group)
+    if chat is None:
+        return {"ok": False, "error": "no_chat", "poll_id": None}
+
+    date_iso = day.isoformat()
+    chat_id = int(chat["chat_id"])
     try:
         message = await bot.send_message(
-            chat_id, text, parse_mode="HTML",
-            reply_markup=att_kb.poll_kb(date_iso, para),
+            chat_id,
+            atext.render_check_poll(subject, day, para, time_range),
+            parse_mode="HTML",
+            reply_markup=att_kb.check_poll_kb(date_iso, para),
         )
     except Exception as exc:
-        logger.warning("attendance poll send failed",
+        logger.warning("check poll send failed",
                        extra={"chat_id": chat_id, "group": group,
                               "error": repr(exc)})
         return {"ok": False, "error": "send_failed", "poll_id": None}
@@ -300,10 +343,71 @@ async def start_poll(conn, bot, group: str, day: date, para: int,
         conn, group, date_iso, para, chat_id,
         getattr(message, "message_id", None),
         closes_at.isoformat(timespec="seconds"),
+        mode=MODE_CHAT, poll_type=POLL_TYPE_CHECK,
     )
-    logger.info("attendance poll started",
+    logger.info("check poll started",
                 extra={"group": group, "date": date_iso, "para": para,
-                       "chat_id": chat_id, "forced": force})
+                       "mode": MODE_CHAT, "chat_id": chat_id,
+                       "forced": force})
+    return {"ok": True, "error": None, "poll_id": poll_id}
+
+
+async def _start_direct_poll(conn, bot, group: str, day: date, para: int,
+                             subject: str, time_range: str,
+                             closes_at: datetime, force: bool) -> dict:
+    """Опрос «Да/Нет» каждому студенту в личку.
+
+    ``chat_id`` записывается нулём: у такого опроса нет одного адресата, а
+    колонка объявлена ``NOT NULL``. Ноль не совпадёт с настоящим Telegram-чатом,
+    поэтому «отредактировать сообщение в чате» по этой записи никто не
+    попытается.
+
+    ``message_id`` не сохраняется: сообщений много (по одному на студента), и
+    при закрытии рассылка идёт заново каждому.
+
+    Returns:
+        ``{'ok': bool, 'error': str | None, 'poll_id': int | None}``.
+    """
+    from bot.attendance import attendance_keyboards as att_kb
+    from bot.attendance import attendance_texts as atext
+
+    students = att_db.get_group_students(conn, group)
+    if not students:
+        return {"ok": False, "error": "no_students", "poll_id": None}
+
+    date_iso = day.isoformat()
+    text = atext.render_check_poll(subject, day, para, time_range,
+                                   direct=True)
+
+    sent = 0
+    for student in students:
+        tg_id = int(student["tg_id"])
+        try:
+            await bot.send_message(
+                tg_id, text, parse_mode="HTML",
+                reply_markup=att_kb.check_poll_kb(date_iso, para),
+            )
+            sent += 1
+        except TelegramForbiddenError:
+            # Бот заблокирован: отметку поставит автозакрытие (absent),
+            # а рассылки в этого студента больше не будет.
+            att_db.deactivate_user(conn, tg_id)
+            logger.info("user deactivated (blocked bot)",
+                        extra={"tg_id": tg_id})
+        except Exception as exc:
+            # Сбой у одного адресата не должен срывать опрос остальным.
+            logger.warning("check poll direct send failed",
+                           extra={"tg_id": tg_id, "error": repr(exc)})
+
+    poll_id = att.create_poll(
+        conn, group, date_iso, para, chat_id=0, message_id=None,
+        closes_at=closes_at.isoformat(timespec="seconds"),
+        mode=MODE_DIRECT, poll_type=POLL_TYPE_CHECK,
+    )
+    logger.info("check poll started",
+                extra={"group": group, "date": date_iso, "para": para,
+                       "mode": MODE_DIRECT, "sent": sent,
+                       "students": len(students), "forced": force})
     return {"ok": True, "error": None, "poll_id": poll_id}
 async def update_poll_message(conn, bot, poll: dict) -> bool:
     """Обновить сообщение-опрос: список отметившихся.
@@ -324,10 +428,20 @@ async def update_poll_message(conn, bot, poll: dict) -> bool:
     day = date.fromisoformat(date_iso)
 
     lesson = get_lesson_for_para(conn, group, day, para) or {}
-    marks = att.get_attendance_list(conn, group, date_iso, para)
-    text = atext.render_poll(group, str(lesson.get("subject") or ""), day,
-                             para, marks,
-                             closed=bool(poll.get("is_closed")))
+    subject = str(lesson.get("subject") or "")
+
+    if str(poll.get("poll_type") or POLL_TYPE_SELF) == POLL_TYPE_CHECK:
+        text = atext.render_check_poll(
+            subject, day, para, time_range_for_date(para, day),
+            direct=(poll.get("mode") == MODE_DIRECT),
+        )
+        keyboard = None if poll.get("is_closed") else _check_poll_kb(date_iso,
+                                                                     para)
+    else:
+        marks = att.get_attendance_list(conn, group, date_iso, para)
+        text = atext.render_poll(group, subject, day, para, marks,
+                                 closed=bool(poll.get("is_closed")))
+        keyboard = None if poll.get("is_closed") else _poll_kb(date_iso, para)
 
     message_id = poll.get("message_id")
     if not message_id:
@@ -336,9 +450,7 @@ async def update_poll_message(conn, bot, poll: dict) -> bool:
     try:
         await bot.edit_message_text(
             chat_id=int(poll["chat_id"]), message_id=int(message_id),
-            text=text, parse_mode="HTML",
-            reply_markup=None if poll.get("is_closed")
-            else _poll_kb(date_iso, para),
+            text=text, parse_mode="HTML", reply_markup=keyboard,
         )
     except TelegramBadRequest as exc:
         logger.debug("poll message not edited",
@@ -358,43 +470,169 @@ def _poll_kb(date_iso: str, para: int):
     return att_kb.poll_kb(date_iso, para)
 
 
-async def finalize_poll_message(conn, bot, poll: dict) -> bool:
-    """Показать итог закрытого опроса: кто отметился, кто нет.
+def _check_poll_kb(date_iso: str, para: int):
+    """Клавиатура опроса «Да/Нет» (ленивый импорт)."""
+    from bot.attendance import attendance_keyboards as att_kb
 
-    Автоматический ``absent`` НЕ ставится: список «не отметились» — это
-    информация для старосты, а прогул он фиксирует сам через ``/mark``.
+    return att_kb.check_poll_kb(date_iso, para)
+
+
+def mark_absent_for_silent(conn, group: str, date_iso: str,
+                           para: int) -> list[dict]:
+    """Поставить ``absent`` тем, кто не ответил на опрос «Да/Нет».
+
+    Это единственное место в проекте, где прогул ставится автоматически.
+    Правило для механики «Да/Нет»: молчание в окне 5 минут = прогул
+    (решение владельца проекта, миграция 14).
+
+    Уже имеющиеся отметки не трогаются: студент мог ответить «нет» сам
+    (``absent``), отметиться через «Я на паре» или получить статус от
+    старосты — перезаписывать чужое решение нельзя.
+
+    Args:
+        conn: соединение SQLite.
+        group: группа.
+        date_iso: дата пары.
+        para: номер пары.
+
+    Returns:
+        Список студентов, которым поставлен ``absent``.
     """
-    from aiogram.exceptions import TelegramBadRequest
+    date.fromisoformat(date_iso)      # падаем сразу при битой дате
+    lesson = get_lesson_for_para(conn, group, date.fromisoformat(date_iso),
+                                 para)
+    subject = str(lesson["subject"]) if lesson else None
+    marked = []
 
+    for student in absent_students(conn, group, date_iso, para):
+        tg_id = int(student["tg_id"])
+        att.mark_attendance(
+            conn, group, date_iso, para, tg_id, str(student["full_name"]),
+            status=STATUS_ABSENT, marked_by=MARKED_BY_BOT,
+            method=METHOD_AUTO, subject=subject,
+        )
+        marked.append({"tg_id": tg_id, "full_name": str(student["full_name"])})
+
+    if marked:
+        logger.info("auto absent for silent students",
+                    extra={"group": group, "date": date_iso, "para": para,
+                           "count": len(marked)})
+    return marked
+
+
+async def finalize_poll_message(conn, bot, poll: dict) -> bool:
+    """Показать итог закрытого опроса.
+
+    Для опроса «Да/Нет» (``poll_type='check'``) сначала ставится ``absent``
+    тем, кто не ответил за 5 минут (:func:`mark_absent_for_silent`), затем:
+
+    - ``mode='chat'`` — редактируется сообщение в чате группы;
+    - ``mode='direct'`` — итог рассылается каждому студенту в личку
+      (в записи нет ``message_id``: сообщений было много).
+
+    Для старого опроса «Я на паре» (``poll_type='self'``) поведение
+    прежнее: ``absent`` не ставится, сообщение в чате показывает итог
+    отметившихся.
+
+    Returns:
+        True, если хотя бы одно сообщение отправлено/отредактировано.
+    """
     from bot.attendance import attendance_texts as atext
 
     group = str(poll["group_name"])
     date_iso = str(poll["date_iso"])
     para = int(poll["para"])
     day = date.fromisoformat(date_iso)
-
     lesson = get_lesson_for_para(conn, group, day, para) or {}
-    marks = att.get_attendance_list(conn, group, date_iso, para)
-    absent = absent_students(conn, group, date_iso, para)
+    subject = str(lesson.get("subject") or "")
 
-    text = atext.render_poll_final(group, str(lesson.get("subject") or ""),
-                                   day, para, marks, absent)
+    if str(poll.get("poll_type") or POLL_TYPE_SELF) == POLL_TYPE_CHECK:
+        if poll.get("is_closed"):
+            # Автоотметки ставим только на закрытии: вызов без закрытия
+            # (например, перерисовка сообщения) не должен никого наказывать.
+            # Повторный вызов безопасен — mark_absent_for_silent трогает
+            # только студентов без отметки.
+            mark_absent_for_silent(conn, group, date_iso, para)
+        marked = att.get_attendance_list(conn, group, date_iso, para)
+        present = sum(1 for mark in marked
+                      if str(mark["status"]) == STATUS_PRESENT)
+        absent = len(marked) - present
+
+        if str(poll.get("mode") or MODE_CHAT) == MODE_DIRECT:
+            return await _finalize_direct(conn, bot, poll, group, day, para,
+                                          subject)
+
+        message_id = poll.get("message_id")
+        if not message_id:
+            return False
+        text = atext.render_check_final(subject, day, para, present, absent)
+        return await _edit_or_warn(bot, int(poll["chat_id"]),
+                                   int(message_id), text, poll.get("id"))
+
+    marks = att.get_attendance_list(conn, group, date_iso, para)
+    absent_students_list = absent_students(conn, group, date_iso, para)
+    text = atext.render_poll_final(group, subject, day, para, marks,
+                                   absent_students_list)
     message_id = poll.get("message_id")
     if not message_id:
         return False
+    return await _edit_or_warn(bot, int(poll["chat_id"]), int(message_id),
+                               text, poll.get("id"))
+
+
+async def _finalize_direct(conn, bot, poll: dict, group: str, day: date,
+                           para: int, subject: str) -> bool:
+    """Разослать итог опроса «Да/Нет» каждому студенту в личку.
+
+    Отправляем именно новое сообщение, а не правим прежнее: ``message_id``
+    в записи опроса для режима ``direct`` не хранится (их было бы столько
+    же, сколько студентов).
+
+    Returns:
+        True, если хотя бы кому-то отправлено.
+    """
+    from bot.attendance import attendance_texts as atext
+
+    date_iso = str(poll["date_iso"])
+    delivered = 0
+
+    for student in att_db.get_group_students(conn, group):
+        tg_id = int(student["tg_id"])
+        mark = att.get_attendance(conn, group, date_iso, para, tg_id)
+        status = str(mark["status"]) if mark else None
+        text = atext.render_check_personal(subject, day, para, status)
+        try:
+            await bot.send_message(tg_id, text, parse_mode="HTML")
+            delivered += 1
+        except TelegramForbiddenError:
+            att_db.deactivate_user(conn, tg_id)
+        except Exception as exc:
+            logger.warning("check poll final send failed",
+                           extra={"tg_id": tg_id, "error": repr(exc)})
+
+    logger.info("check poll finalized (direct)",
+                extra={"group": group, "date": date_iso, "para": para,
+                       "delivered": delivered})
+    return delivered > 0
+
+
+async def _edit_or_warn(bot, chat_id: int, message_id: int, text: str,
+                        poll_id) -> bool:
+    """Отредактировать сообщение, не падая на ожидаемых ошибках Telegram."""
+    from aiogram.exceptions import TelegramBadRequest
 
     try:
         await bot.edit_message_text(
-            chat_id=int(poll["chat_id"]), message_id=int(message_id),
-            text=text, parse_mode="HTML",
+            chat_id=chat_id, message_id=message_id, text=text,
+            parse_mode="HTML",
         )
     except TelegramBadRequest as exc:
-        logger.debug("final poll message not edited",
-                     extra={"error": str(exc), "poll_id": poll.get("id")})
+        logger.debug("poll message not edited",
+                     extra={"error": str(exc), "poll_id": poll_id})
         return False
     except Exception as exc:
-        logger.warning("final poll message failed",
-                       extra={"error": repr(exc), "poll_id": poll.get("id")})
+        logger.warning("poll message edit failed",
+                       extra={"error": repr(exc), "poll_id": poll_id})
         return False
     return True
 

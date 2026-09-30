@@ -125,6 +125,58 @@ def set_student_role(conn: sqlite3.Connection, tg_id: int, role: str) -> bool:
     return cursor.rowcount > 0
 
 
+def get_attendance_mode(conn: sqlite3.Connection,
+                        group_name: str) -> str:
+    """Режим посещаемости группы: ``chat`` или ``direct``.
+
+    Читается при создании опроса и запоминается в самом опросе: иначе смена
+    режима старостой во время активного опроса сломала бы разосланные
+    сообщения.
+
+    Args:
+        conn: соединение SQLite.
+        group_name: группа.
+
+    Returns:
+        Значение ``attendance_mode``; ``'chat'``, если группа не найдена
+        (поведение по умолчанию — как было до миграции 14).
+    """
+    from bot.attendance.models import MODE_CHAT
+
+    row = conn.execute(
+        "SELECT attendance_mode FROM study_groups WHERE group_name = ?",
+        (group_name,),
+    ).fetchone()
+    if row is None:
+        return MODE_CHAT
+    return str(row["attendance_mode"] or MODE_CHAT)
+
+
+def set_attendance_mode(conn: sqlite3.Connection, group_name: str,
+                        mode: str) -> bool:
+    """Сменить режим посещаемости группы.
+
+    Args:
+        conn: соединение SQLite.
+        group_name: группа.
+        mode: ``chat`` или ``direct``.
+
+    Returns:
+        True, если группа найдена и режим записан.
+    """
+    from bot.attendance.models import ALL_MODES
+
+    if mode not in ALL_MODES:
+        raise ValueError(f"unknown attendance mode: {mode!r}")
+
+    with transaction(conn):
+        cursor = conn.execute(
+            "UPDATE study_groups SET attendance_mode = ? WHERE group_name = ?",
+            (mode, group_name),
+        )
+    return cursor.rowcount > 0
+
+
 def get_group_students(conn: sqlite3.Connection,
                        group_name: str) -> list[dict]:
     """Студенты группы по алфавиту."""

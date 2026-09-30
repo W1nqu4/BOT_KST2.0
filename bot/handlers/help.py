@@ -25,6 +25,7 @@ from bot.handlers.calendar import (
     _base_url,
     send_calendar_links,
 )
+from bot.keyboards import inline as inline_kb
 from bot.keyboards import reply as reply_kb
 
 logger = logging.getLogger(__name__)
@@ -42,14 +43,14 @@ HELP_TEXT = (
     "🔔 За 5 минут до пары — напоминание с предметом и кабинетом\n\n"
     "<b>Команды</b>\n"
     "/start — начать, сменить группу\n"
-    "/setup_schedule — указать группу для расписания\n"
-    "/mygroup — вступить в группу по коду (для посещаемости)\n"
+    "/setup_schedule — указать группу для расписания (без кода)\n"
+    "/mygroup — вступить в группу посещаемости по коду старосты\n"
     "/teacher — расписание преподавателя\n"
     "/help — эта справка\n"
     "/settings — настройки уведомлений\n"
     "/attendance — отметиться на паре\n"
-    "/my_attendance — моя посещаемость\n"
-    "/vote — запустить голосование (только староста)\n"
+    "/my_attendance — моя посещаемость и аттестация\n"
+    "/vote — запустить голосование за отсутствующих (староста)\n"
     "/make_deputy — назначить зама (только староста)\n"
     "/admin — админ-панель (только для создателя)\n"
     "/make_starosta — назначить старосту (только для админа)\n"
@@ -158,15 +159,22 @@ async def _profile_text(conn, tg_id: int) -> str:
 
 @router.message(F.text == reply_kb.BTN_PROFILE)
 async def btn_profile(message: Message, conn, settings, state: FSMContext) -> None:
-    """Профиль: группа, посещаемость, дедлайны и интеграция с календарём."""
+    """Профиль: группа, посещаемость, дедлайны и интеграция с календарём.
+
+    Без группы показываем тот же выбор, что в приветствии и расписании:
+    указать группу для расписания или ввести код старосты. Раньше здесь была
+    тупиковая подсказка «сначала выбери группу — /start», из которой студент
+    без кода не мог выйти.
+    """
+    from bot.attendance import texts as att_texts
     from bot.state import SCREEN_PROFILE, set_last_screen
 
     tg_id = message.from_user.id if message.from_user else 0
     group = db.get_user_group(conn, tg_id)
     if not group:
         await message.answer(
-            "Профиль пуст: сначала выбери группу — /start",
-            parse_mode="HTML",
+            att_texts.PROFILE_NO_GROUP_TEXT, parse_mode="HTML",
+            reply_markup=inline_kb.profile_no_group_kb(),
         )
         return
 

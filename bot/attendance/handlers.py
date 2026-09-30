@@ -21,12 +21,14 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, Message
 
 from bot import db
-from bot.attendance import db as att_db
 from bot.attendance import attendance_handlers as att_marks
 from bot.attendance import attendance_keyboards as att_kb
+from bot.attendance import db as att_db
 from bot.attendance import keyboards as kb
 from bot.attendance import service
 from bot.attendance import texts
+from bot.attendance.models import ALL_MODES, MODE_DIRECT
+from bot.keyboards import inline as inline_kb
 
 logger = logging.getLogger(__name__)
 
@@ -60,10 +62,14 @@ def _name_of(message: Message) -> str:
 
 async def _greet(message: Message, registered: bool, has_schedule_group:
                  bool = False) -> None:
-    """Показать приветствие с главным меню.
+    """Показать приветствие.
 
-    «С возвращением» показываем, если пользователь уже настроил хоть что-то:
-    группу для посещаемости (``students``) или группу для расписания
+    Уже настроенному пользователю — короткое «с возвращением» и главное меню
+    (группу он уже указал). Новичку — полный текст и выбор из трёх шагов:
+    группа для расписания, код старосты, пояснение разницы.
+
+    «С возвращением» показываем, если настроено хоть что-то: группа
+    посещаемости (``students``) или группа для расписания
     (``users.group_name``). Обе системы сосуществуют, поэтому достаточно
     любой — иначе вернувшийся студент получал бы текст как в первый раз.
     """
@@ -76,8 +82,32 @@ async def _greet(message: Message, registered: bool, has_schedule_group:
         )
         return
     await message.answer(
-        texts.GREETING, parse_mode="HTML", reply_markup=kb.main_kb(),
+        texts.GREETING, parse_mode="HTML",
+        reply_markup=inline_kb.greeting_kb(),
     )
+
+
+@router.callback_query(F.data == inline_kb.CB_HELP_CHOOSE)
+async def cb_help_choose(callback: CallbackQuery) -> None:
+    """«ℹ️ Что выбрать?» — пояснить разницу двух способов.
+
+    Отвечаем редактированием того же сообщения: пояснение — не отдельный
+    экран, а раскрытие уже показанного выбора.
+    """
+    if callback.message is not None:
+        try:
+            await callback.message.edit_text(
+                texts.CHOOSE_TEXT, parse_mode="HTML",
+                reply_markup=inline_kb.choose_back_kb(),
+            )
+        except Exception:
+            # Сообщение могли удалить — тогда просто отправляем новое.
+            logger.debug("could not edit choose screen", exc_info=True)
+            await callback.message.answer(
+                texts.CHOOSE_TEXT, parse_mode="HTML",
+                reply_markup=inline_kb.choose_back_kb(),
+            )
+    await callback.answer()
 
 
 @router.message(CommandStart())
@@ -130,6 +160,7 @@ async def my_group(message: Message, state: FSMContext, conn) -> None:
 async def cmd_my_group(message: Message, state: FSMContext, conn) -> None:
     """Команда /mygroup — то же, что кнопка «📊 Моя группа»."""
     await my_group(message, state, conn)
+
 # --- регистрация по коду ---
 
 @router.callback_query(F.data == kb.CB_ENTER_CODE)
@@ -362,6 +393,66 @@ async def manage(callback: CallbackQuery, conn) -> None:
             reply_markup=kb.group_management_kb(),
         )
     await callback.answer()
+
+
+@router.callback_query(F.data == kb.CB_ATT_MODE)
+async def attendance_mode(callback: CallbackQuery, conn) -> None:
+    """«📊 Режим посещаемости» — экран выбора режима (только староста)."""
+    student = _require_student(conn, _callback_tg_id(callback))
+    if student is None:
+        await callback.answer(texts.NOT_REGISTERED, show_alert=True)
+        return
+
+    group_name = str(student["group_name"])
+    if not service.is_group_admin(conn, group_name,
+                                  _callback_tg_id(callback)):
+        await callback.answer(texts.MANAGE_DENIED, show_alert=True)
+        return
+
+    current = att_db.get_attendance_mode(conn, group_name)
+    if callback.message is not None:
+        await callback.message.answer(
+            texts.attendance_mode_screen(current),
+            parse_mode="HTML",
+            reply_markup=att_kb.attendance_mode_kb(current),
+        )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith(f"{kb.CB_ATT_MODE}:"))
+async def set_attendance_mode(callback: CallbackQuery, conn) -> None:
+    """``grp:att_mode:{chat|direct}`` — сменить режим (только староста).
+
+    Режим применяется к НОВЫМ опросам: у уже созданных он записан в самом
+    опросе (``attendance_polls.mode``), поэтому активные опросы продолжают
+    работать по прежним правилам.
+    """
+    student = _require_student(conn, _callback_tg_id(callback))
+    if student is None:
+        await callback.answer(texts.NOT_REGISTERED, show_alert=True)
+        return
+
+    group_name = str(student["group_name"])
+    if not service.is_group_admin(conn, group_name,
+                                  _callback_tg_id(callback)):
+        await callback.answer(texts.MANAGE_DENIED, show_alert=True)
+        return
+
+    mode = (callback.data or "").removeprefix(f"{kb.CB_ATT_MODE}:")
+    if mode not in ALL_MODES:
+        await callback.answer()
+        return
+
+    att_db.set_attendance_mode(conn, group_name, mode)
+    notice = (texts.MODE_CHANGED_DIRECT if mode == MODE_DIRECT
+              else texts.MODE_CHANGED_CHAT)
+
+    if callback.message is not None:
+        await callback.message.answer(
+            notice, parse_mode="HTML",
+            reply_markup=att_kb.attendance_mode_kb(mode),
+        )
+    await callback.answer("✅ Режим сохранён")
 
 
 @router.callback_query(F.data == kb.CB_SHOW_CODE)

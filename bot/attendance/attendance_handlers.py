@@ -54,6 +54,63 @@ def is_group_admin(conn, tg_id: int) -> bool:
     return str(student["role"]) in ("starosta", "deputy")
 
 
+@router.callback_query(F.data.startswith(att_kb.CB_CHECK_PREFIX))
+async def cb_check(callback: CallbackQuery, conn, bot) -> None:
+    """``att:check:{date}:{para}:{yes|no}`` — ответ на опрос «Да/Нет».
+
+    «Нет» — полноценный ответ: он сразу пишет ``absent`` (не ответившие
+    получат тот же статус при закрытии опроса). Группа берётся у отвечающего,
+    а не из callback: подделать пару можно, группу — нет.
+    """
+    payload = (callback.data or "").removeprefix(att_kb.CB_CHECK_PREFIX)
+    parts = payload.split(":")
+    if len(parts) != 3:
+        await callback.answer()
+        return
+    date_iso, raw_para, answer = parts
+    if answer not in ("yes", "no"):
+        await callback.answer()
+        return
+    try:
+        para = int(raw_para)
+        date.fromisoformat(date_iso)
+    except ValueError:
+        await callback.answer()
+        return
+
+    tg_id = _cb_tg_id(callback)
+    student = att_db.get_student(conn, tg_id)
+    if student is None:
+        await callback.answer(atext.ALERT_NOT_IN_GROUP, show_alert=True)
+        return
+
+    group = str(student["group_name"])
+    poll = att.get_poll(conn, group, date_iso, para)
+    if poll is None or poll.get("is_closed"):
+        await callback.answer(atext.ALERT_CHECK_CLOSED, show_alert=True)
+        return
+    if att.attendance_exists(conn, group, date_iso, para, tg_id):
+        await callback.answer(atext.ALERT_CHECK_ALREADY, show_alert=True)
+        return
+
+    status = "present" if answer == "yes" else "absent"
+    result = att_svc.apply_mark(
+        conn, group, date_iso, para, tg_id, str(student["full_name"]),
+        status=status, marked_by=tg_id, method="self",
+    )
+    if not result["ok"]:
+        await callback.answer(atext.ALERT_CHECK_ALREADY, show_alert=True)
+        return
+
+    if poll.get("mode") == "chat":
+        # В режиме лички править нечего: у каждого своё сообщение.
+        await att_svc.update_poll_message(conn, bot, poll)
+
+    await callback.answer(
+        atext.ALERT_CHECK_YES if answer == "yes" else atext.ALERT_CHECK_NO
+    )
+
+
 @router.callback_query(F.data.startswith(att_kb.CB_MARK_PREFIX))
 async def mark_present(callback: CallbackQuery, conn, bot) -> None:
     """«✅ Я на паре» — отметка из опроса в чате.

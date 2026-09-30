@@ -24,6 +24,7 @@ from bot.attendance.migrations import (
     migrate_11_attendance_marks,
     migrate_12_attendance_subject,
     migrate_13_attendance_votes,
+    migrate_14_attendance_mode,
 )
 from bot.db import transaction
 
@@ -357,6 +358,7 @@ MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     11: migrate_11_attendance_marks,
     12: migrate_12_attendance_subject,
     13: migrate_13_attendance_votes,
+    14: migrate_14_attendance_mode,
 }
 
 

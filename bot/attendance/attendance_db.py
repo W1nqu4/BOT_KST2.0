@@ -132,25 +132,42 @@ def get_attendance_for_group_period(conn: sqlite3.Connection, group_name: str,
 
 def create_poll(conn: sqlite3.Connection, group_name: str, date_iso: str,
                 para: int, chat_id: int, message_id: int | None,
-                closes_at: str, now: str | None = None) -> int:
+                closes_at: str, mode: str = "chat",
+                poll_type: str = "self",
+                now: str | None = None) -> int:
     """Создать опрос на пару. Возвращает id опроса.
 
     При повторном вызове для той же пары (гонка двух проходов цикла) запись
-    не дублируется: обновляются ``chat_id``, ``message_id`` и ``closes_at``.
+    не дублируется: обновляются ``chat_id``, ``message_id``, ``closes_at``,
+    ``mode`` и ``poll_type``.
+
+    Args:
+        conn: соединение SQLite.
+        group_name: группа.
+        date_iso: дата пары.
+        para: номер пары.
+        chat_id: куда ушло сообщение-опрос (чат группы либо личка).
+        message_id: id сообщения (только для ``mode='chat'``).
+        closes_at: момент закрытия.
+        mode: ``chat`` или ``direct`` — режим на момент создания.
+        poll_type: ``self`` (старый «Я на паре») или ``check`` («Да/Нет»).
+        now: момент старта в ISO (для тестов).
     """
     started = now or _now()
     with transaction(conn):
         conn.execute(
             "INSERT INTO attendance_polls"
             " (group_name, date_iso, para, chat_id, message_id, started_at,"
-            "  closes_at, is_closed)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, 0)"
+            "  closes_at, is_closed, mode, poll_type)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?)"
             " ON CONFLICT(group_name, date_iso, para) DO UPDATE SET"
             "   chat_id = excluded.chat_id,"
             "   message_id = excluded.message_id,"
-            "   closes_at = excluded.closes_at",
+            "   closes_at = excluded.closes_at,"
+            "   mode = excluded.mode,"
+            "   poll_type = excluded.poll_type",
             (group_name, date_iso, para, chat_id, message_id, started,
-             closes_at),
+             closes_at, mode, poll_type),
         )
         row = conn.execute(
             "SELECT id FROM attendance_polls"

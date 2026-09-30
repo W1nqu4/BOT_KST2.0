@@ -110,3 +110,47 @@ def migrate_13_attendance_votes(conn: sqlite3.Connection) -> None:
     conn.execute(CREATE_ATTENDANCE_VOTES)
     conn.execute(CREATE_ATTENDANCE_VOTES_TARGET_INDEX)
     conn.execute(CREATE_ATTENDANCE_VOTE_POLLS)
+def _add_column(conn: sqlite3.Connection, table: str, column: str,
+                definition: str) -> None:
+    """Добавить колонку, если её ещё нет (идемпотентно).
+
+    ``ALTER TABLE ADD COLUMN`` при повторе падает с ``duplicate column name``,
+    поэтому состав колонок проверяется заранее. Так миграцию можно применить
+    на базе, где колонка уже есть (например, её добавили вручную), не уронив
+    весь ``apply_migrations``.
+    """
+    columns = {str(row["name"]) for row in conn.execute(
+        f"PRAGMA table_info({table})"
+    )}
+    if column not in columns:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+
+def migrate_14_attendance_mode(conn: sqlite3.Connection) -> None:
+    """Миграция 13 → 14: режим опросов и тип опроса «Да/Нет».
+
+    Три колонки:
+
+    - ``study_groups.attendance_mode`` — куда староста хочет получать опросы:
+      в чат группы (``chat``, поведение по умолчанию) или каждому студенту в
+      личку (``direct``);
+    - ``attendance_polls.mode`` — режим **на момент создания** опроса. Читать
+      его из ``study_groups`` на лету нельзя: староста может переключить режим,
+      пока опрос активен, и разосланные сообщения перестанут соответствовать
+      записи (в ``direct`` это отдельное сообщение каждому студенту);
+    - ``attendance_polls.poll_type`` — ``self`` (старый опрос «Я на паре», до
+      конца пары, без автоотметок) или ``check`` (новый «Да/Нет», окно 5 минут,
+      не ответившие получают ``absent`` автоматически).
+
+    Существующие опросы получают значения по умолчанию (``chat``/``self``),
+    поэтому старая механика для них не ломается: ``/`` их закрытие идёт по
+    прежнему пути без авто-``absent``.
+
+    Таблицы не пересоздаются — только ``ALTER TABLE ADD COLUMN``.
+    """
+    _add_column(conn, "study_groups", "attendance_mode",
+                "TEXT NOT NULL DEFAULT 'chat'")
+    _add_column(conn, "attendance_polls", "mode",
+                "TEXT NOT NULL DEFAULT 'chat'")
+    _add_column(conn, "attendance_polls", "poll_type",
+                "TEXT NOT NULL DEFAULT 'self'")

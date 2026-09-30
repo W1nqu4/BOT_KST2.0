@@ -22,6 +22,8 @@ CB_TODAY = "att:today"
 CB_CYCLE_PREFIX = "att:mk:"        # att:mk:0
 CB_REQUEST_PREFIX = "att:req:"     # att:req:2026-09-30:2
 CB_BACK = "att:back"
+# Опрос «Да/Нет» (миграция 14): att:check:{date}:{para}:{yes|no}
+CB_CHECK_PREFIX = "att:check:"
 
 
 def poll_kb(date_iso: str, para: int) -> InlineKeyboardMarkup:
@@ -103,4 +105,60 @@ def request_poll_kb(date_iso: str, para: int) -> InlineKeyboardMarkup:
             text="📣 Запустить опрос",
             callback_data=f"{CB_REQUEST_PREFIX}{date_iso}:{para}",
         )],
+    ])
+
+
+# --- опрос «Да/Нет» (миграция 14) ---
+
+def check_poll_kb(date_iso: str, para: int) -> InlineKeyboardMarkup:
+    """Кнопки опроса «Да/Нет»: «Я на паре» и «Меня нет».
+
+    Две кнопки в одном ряду: студент отвечает в одно нажатие, а «нет» — такой
+    же полноценный ответ, как «да» (он сразу пишет ``absent``).
+
+    Args:
+        date_iso: дата пары.
+        para: номер пары.
+
+    Returns:
+        InlineKeyboardMarkup с двумя кнопками.
+    """
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(
+            text=atext.CHECK_BUTTON_YES,
+            callback_data=f"{CB_CHECK_PREFIX}{date_iso}:{para}:yes",
+        ),
+        InlineKeyboardButton(
+            text=atext.CHECK_BUTTON_NO,
+            callback_data=f"{CB_CHECK_PREFIX}{date_iso}:{para}:no",
+        ),
+    ]])
+
+
+def attendance_mode_kb(current: str) -> InlineKeyboardMarkup:
+    """Кнопки выбора режима посещаемости (староста).
+
+    Текущий режим помечается галочкой в подписи — как в остальных экранах
+    настроек проекта, чтобы было видно, что уже выбрано.
+
+    Args:
+        current: текущий режим (``chat`` или ``direct``).
+
+    Returns:
+        InlineKeyboardMarkup: выбор режима + «🔙 Назад».
+    """
+    from bot.attendance import keyboards as group_kb
+    from bot.attendance.models import MODE_DIRECT
+
+    direct_mark = " ✅" if current == MODE_DIRECT else ""
+    chat_mark = "" if current == MODE_DIRECT else " ✅"
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text=f"📱 Личка{direct_mark}",
+                                 callback_data="grp:att_mode:direct"),
+            InlineKeyboardButton(text=f"💬 Чат группы{chat_mark}",
+                                 callback_data="grp:att_mode:chat"),
+        ],
+        [InlineKeyboardButton(text="🔙 Назад",
+                              callback_data=group_kb.CB_MANAGE)],
     ])

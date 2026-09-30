@@ -44,6 +44,27 @@ ALERT_ALREADY_MARKED = "Ты уже отметился"
 ALERT_MARKED = "✅ Отмечен"
 ALERT_MARKED_LATE = "✅ Отмечен (опоздал)"
 
+# --- опрос «Да/Нет» (миграция 14) ---
+CHECK_BUTTON_YES = "✅ Я на паре"
+CHECK_BUTTON_NO = "❌ Меня нет"
+ALERT_CHECK_YES = "✅ Отмечен как присутствующий"
+ALERT_CHECK_NO = "❌ Отмечен как отсутствующий"
+ALERT_CHECK_ALREADY = "Ты уже ответил"
+ALERT_CHECK_CLOSED = "Опрос уже закрыт"
+ALERT_NOT_IN_GROUP = "Ты не в группе"
+
+# Экран «Режим посещаемости» (староста).
+BTN_ATT_MODE = "📊 Режим посещаемости"
+MODE_DENIED = "⛔ Режим меняет только староста."
+MODE_CHANGED_CHAT = (
+    "✅ Режим изменён на «Чат группы».\n\n"
+    "Со следующей пары бот будет присылать опрос в чат группы."
+)
+MODE_CHANGED_DIRECT = (
+    "✅ Режим изменён на «Личка».\n\n"
+    "Со следующей пары бот будет присылать опросы в личку."
+)
+
 # /attendance вне пары.
 NO_PARA_NOW = (
     "Сейчас пар нет. Отметки доступны только во время пары.\n\n"
@@ -363,6 +384,104 @@ def render_mark_list(group: str, day, para: int, subject: str,
 def mark_button_label(status: str | None) -> str:
     """Подпись кнопки студента в /mark: иконка текущего статуса или ➖."""
     return STATUS_ICONS.get(str(status or ""), "➖")
+
+
+def render_check_poll(subject: str, day, para: int, time_range: str,
+                      direct: bool = False) -> str:
+    """Опрос «Да/Нет» в начале пары (миграция 14).
+
+    Args:
+        subject: название предмета.
+        day: дата пары.
+        para: номер пары.
+        time_range: интервал пары («09:00-10:35»).
+        direct: True — сообщение уходит студенту в личку (обращение на «ты»
+            с вопросом), False — в чат группы.
+
+    Returns:
+        HTML-текст сообщения.
+    """
+    header = f"📚 <b>{escape(subject)}</b> · {para} пара"
+    if time_range:
+        header += f"\n⏰ {escape(time_range)}"
+    question = "Ты на паре?" if direct else "Ты на паре? Жми свою кнопку:"
+    return f"{header}\n\n{question}"
+
+
+def render_check_final(subject: str, day, para: int, present: int,
+                       absent: int) -> str:
+    """Итог опроса «Да/Нет» в чате группы.
+
+    Args:
+        subject: предмет.
+        day: дата пары.
+        para: номер пары.
+        present: сколько были.
+        absent: сколько прогуляли (ответили «нет» и не ответили).
+
+    Returns:
+        HTML-текст сообщения.
+    """
+    header = (f"🔒 <b>Опрос закрыт</b>\n"
+              f"📚 {escape(subject)} · {para} пара · "
+              f"{day.strftime('%d.%m')}")
+    return (f"{header}\n\n"
+            f"✅ Были: {present}\n"
+            f"❌ Прогуляли: {absent}\n\n"
+            f"Подробнее — /my_attendance")
+
+
+def render_check_personal(subject: str, day, para: int,
+                          status: str | None) -> str:
+    """Итог опроса «Да/Нет» студенту в личку.
+
+    Args:
+        subject: предмет.
+        day: дата пары.
+        para: номер пары.
+        status: ``present`` | ``absent`` | None (не ответил).
+
+    Returns:
+        HTML-текст сообщения.
+    """
+    if status == STATUS_PRESENT:
+        mark = "✅ был"
+    elif status == STATUS_ABSENT:
+        mark = "❌ прогулял"
+    elif status == STATUS_EXCUSED:
+        mark = "📝 по уважительной"
+    elif status == STATUS_LATE:
+        mark = "⏰ опоздал"
+    else:
+        mark = "⚠️ не ответил — записан прогул"
+
+    return (
+        f"🔒 Опрос по <b>{escape(subject)}</b> закрыт\n"
+        f"📅 {day.strftime('%d.%m')} · {para} пара\n\n"
+        f"Ты: {mark}\n\n"
+        f"Если что-то не так — попроси старосту отметить вручную."
+    )
+
+
+def attendance_mode_screen(current: str) -> str:
+    """Экран «Режим посещаемости» для старосты.
+
+    Args:
+        current: текущий режим (``chat`` или ``direct``).
+
+    Returns:
+        HTML-текст экрана.
+    """
+    from bot.attendance.models import MODE_DIRECT
+
+    label = "Личка" if current == MODE_DIRECT else "Чат группы"
+    return (
+        "📊 <b>Режим посещаемости</b>\n\n"
+        "Как отмечать пары?\n\n"
+        "📱 <b>Личка</b> — каждому студенту в личку\n"
+        "💬 <b>Чат группы</b> — опрос в чат группы\n\n"
+        f"Текущий: <b>{label}</b>"
+    )
 
 
 def month_title(day) -> str:

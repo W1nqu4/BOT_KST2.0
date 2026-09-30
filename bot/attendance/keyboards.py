@@ -37,6 +37,9 @@ CB_DEPUTY_PREFIX = "grp:deputy:"       # grp:deputy:{tg_id}
 CB_BACK = "grp:back"
 CB_MENU = "menu:home"
 
+# Режим посещаемости (миграция 14): grp:att_mode:{chat|direct}.
+CB_ATT_MODE = "grp:att_mode"
+
 # Возврат в «Профиль» из вложенных экранов и листание месяцев сводки.
 CB_PROFILE_BACK = "profile:back"
 CB_ATT_PERIOD_PREFIX = "att:per:"      # att:per:0 — текущий, att:per:-1 — прошлый
@@ -84,17 +87,20 @@ def my_group_not_registered_kb() -> InlineKeyboardMarkup:
 
 
 def my_group_student_kb() -> InlineKeyboardMarkup:
-    """Плитки студента: отметка на паре, список группы, меню.
+    """Плитки студента: отметка, посещаемость, список группы, меню.
 
-    «📊 Моя посещаемость» переехала в «Профиль» (она не про текущую группу,
-    а про личную статистику за месяц), поэтому здесь её больше нет.
+    «📊 Моя посещаемость» вернулась сюда (миграция 14): студент ищет её в
+    своей группе, поэтому кнопка есть и в «Моей группе», и в «Профиле» —
+    ведут они на один и тот же экран.
 
     Returns:
-        InlineKeyboardMarkup с тремя кнопками.
+        InlineKeyboardMarkup с четырьмя кнопками.
     """
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✏️ Отметиться на паре",
                               callback_data=CB_MARK)],
+        [InlineKeyboardButton(text="📊 Моя посещаемость",
+                              callback_data=CB_MY_ATTENDANCE)],
         [InlineKeyboardButton(text="📋 Список группы", callback_data=CB_LIST)],
         [InlineKeyboardButton(text="🏠 Меню", callback_data=CB_MENU)],
     ])
@@ -124,13 +130,15 @@ def my_group_starosta_kb() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="🏠 Меню", callback_data=CB_MENU)],
     ])
 def group_management_kb() -> InlineKeyboardMarkup:
-    """Управление группой: код, перегенерация, назначение зама, назад."""
+    """Управление группой: код, перегенерация, режим, зам, назад."""
     return InlineKeyboardMarkup(inline_keyboard=[
         [
             InlineKeyboardButton(text="🔑 Показать код",
                                  callback_data=CB_SHOW_CODE),
             InlineKeyboardButton(text="🔄 Новый код", callback_data=CB_NEW_CODE),
         ],
+        [InlineKeyboardButton(text="📊 Режим посещаемости",
+                              callback_data=CB_ATT_MODE)],
         [InlineKeyboardButton(text="👤 Назначить зама",
                               callback_data=CB_MAKE_DEPUTY)],
         [InlineKeyboardButton(text="🔙 Назад", callback_data=CB_BACK)],

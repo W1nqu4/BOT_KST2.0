@@ -30,10 +30,28 @@ STATUS_CYCLE = (STATUS_PRESENT, STATUS_LATE, STATUS_ABSENT, STATUS_EXCUSED)
 # Все допустимые статусы.
 ALL_STATUSES = frozenset(STATUS_CYCLE)
 
-# Способы отметки: студент сам, староста, голосование в чате.
+# Способы отметки: студент сам, староста, голосование в чате, автозакрытие.
 METHOD_SELF = "self"
 METHOD_STAROSTA = "starosta"
 METHOD_VOTE = "vote"
+# Автоматическая отметка при закрытии опроса «Да/Нет»: студент не ответил
+# за окно в 5 минут, поэтому прогул ставит бот (миграция 14).
+METHOD_AUTO = "auto"
+
+# Режимы посещаемости группы (``study_groups.attendance_mode``):
+# опрос уходит в чат группы или каждому студенту в личку.
+MODE_CHAT = "chat"
+MODE_DIRECT = "direct"
+ALL_MODES = (MODE_CHAT, MODE_DIRECT)
+
+# Типы опросов (``attendance_polls.poll_type``):
+# ``self`` — старая механика «Я на паре» (опрос до конца пары, без автоотметок);
+# ``check`` — новая механика «Да/Нет» с окном в 5 минут и авто-absent.
+POLL_TYPE_SELF = "self"
+POLL_TYPE_CHECK = "check"
+
+# Сколько минут длится окно опроса «Да/Нет» (миграция 14).
+CHECK_POLL_MINUTES = 5
 
 # Сколько минут после начала пары отметка считается «опоздал».
 LATE_AFTER_MINUTES = 15
@@ -72,6 +90,15 @@ CREATE_ATTENDANCE_TG_ID_INDEX = (
 )
 
 # Таблица опросов: один опрос на (группа, дата, пара).
+#
+# ``mode`` и ``poll_type`` добавлены миграцией 14. Режим хранится в самой
+# записи, а не читается из ``study_groups`` на лету: иначе смена режима
+# старостой во время активного опроса сломала бы уже разосланные сообщения
+# (в ``direct`` одно сообщение на студента, редактировать нечего).
+#
+# ``message_id`` заполняется только для ``mode='chat'``. В режиме ``direct``
+# сообщений много (по одному на студента), и держать их список в этой таблице
+# смысла нет: при закрытии рассылка идёт заново каждому студенту.
 CREATE_ATTENDANCE_POLLS = """
     CREATE TABLE IF NOT EXISTS attendance_polls (
         id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -83,6 +110,8 @@ CREATE_ATTENDANCE_POLLS = """
         started_at TEXT    NOT NULL,
         closes_at  TEXT    NOT NULL,
         is_closed  INTEGER NOT NULL DEFAULT 0,
+        mode       TEXT    NOT NULL DEFAULT 'chat',
+        poll_type  TEXT    NOT NULL DEFAULT 'self',
         UNIQUE (group_name, date_iso, para)
     )
 """
@@ -144,6 +173,9 @@ ADMIN_ROLES = frozenset({ROLE_STAROSTA})
 MANAGE_ROLES = frozenset({ROLE_STAROSTA})
 
 # Таблица групп: одна строка на учебную группу КСТ.
+#
+# ``attendance_mode`` (миграция 14) — куда староста хочет получать опросы
+# «Да/Нет»: в чат группы (``chat``) или каждому студенту в личку (``direct``).
 CREATE_STUDY_GROUPS = """
     CREATE TABLE IF NOT EXISTS study_groups (
         group_name    TEXT PRIMARY KEY,
@@ -151,7 +183,8 @@ CREATE_STUDY_GROUPS = """
         starosta_tg_id INTEGER,
         deputy_tg_id   INTEGER,
         created_at    TEXT NOT NULL,
-        created_by    INTEGER NOT NULL
+        created_by    INTEGER NOT NULL,
+        attendance_mode TEXT NOT NULL DEFAULT 'chat'
     )
 """
 

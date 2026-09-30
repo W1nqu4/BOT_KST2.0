@@ -1,4 +1,4 @@
-"""Тесты хендлеров посещаемости (этап 1) через реальный Dispatcher.
+﻿"""Тесты хендлеров посещаемости (этап 1) через реальный Dispatcher.
 
 Bot подменяется заглушкой (см. ``tests/test_handlers_dispatch.FakeBot``),
 поэтому проверяется вся цепочка: фильтры → FSM → сервис → БД → ответ.
@@ -12,6 +12,7 @@ from aiogram import Dispatcher
 from aiogram.types import CallbackQuery, Chat, Message, Update, User
 
 from bot import db
+from bot.attendance import attendance_db as att
 from bot.attendance import db as att_db
 from bot.attendance import keyboards as kb
 from bot.attendance import service
@@ -153,13 +154,19 @@ def _last_code(bot: FakeBot) -> str:
 # --- /start ---
 
 async def test_start_shows_greeting(dp, conn) -> None:
-    """/start показывает приветствие из texts.GREETING."""
+    """/start показывает приветствие с выбором из трёх шагов."""
     bot = AttendanceBot()
     await dp.feed_update(bot, _update("/start"))
 
     body = " ".join(_texts(bot))
     assert "Я бот расписания КСТ" in body
-    assert "Моя группа" in body
+    assert "Что я умею" in body
+    assert "Начни с одного из шагов" in body
+    # Сам выбор — это подписи кнопок, а не текст сообщения.
+    labels = " | ".join(_buttons(bot))
+    assert "Указать мою группу" in labels
+    assert "Ввести код старосты" in labels
+    assert "Что выбрать?" in labels
 
 
 async def test_start_after_group_short_greeting(dp, conn) -> None:
@@ -196,8 +203,8 @@ async def test_my_group_student_sees_student_kb(dp, conn) -> None:
     labels = " | ".join(_buttons(bot))
     assert "Отметиться на паре" in labels
     assert "Список группы" in labels
-    # «Моя посещаемость» переехала в «Профиль» — в «Моей группе» её нет.
-    assert "Моя посещаемость" not in labels
+    # «Моя посещаемость» вернулась сюда миграцией 14 (и осталась в профиле).
+    assert "Моя посещаемость" in labels
 
 
 async def test_my_group_starosta_sees_starosta_kb(dp, conn) -> None:
@@ -585,3 +592,249 @@ async def test_report_week_denied_for_student(dp, conn) -> None:
     await dp.feed_update(bot, _update("/report_week", STUDENT_ID))
 
     assert any("только старосте" in t for t in _texts(bot))
+# --- опрос «Да/Нет»: нажатия (миграция 14) ---
+
+CHECK_DATE = "2026-09-30"
+CHECK_PARA = 1      # в фикстуре расписание на понедельник, 1 пара
+
+
+def _open_check_poll(conn, *, closed: bool = False) -> None:
+    """Создать опрос «Да/Нет» по тестовой паре."""
+    with transaction(conn):
+        conn.execute(
+            "INSERT INTO attendance_polls (group_name, date_iso, para,"
+            " chat_id, started_at, closes_at, is_closed, mode, poll_type)"
+            " VALUES (?, ?, ?, ?, 'x', 'x', ?, 'chat', 'check')",
+            (GROUP, CHECK_DATE, CHECK_PARA, -100700, 1 if closed else 0),
+        )
+
+
+async def test_check_yes_marks_present(dp, conn) -> None:
+    """Нажатие «Я на паре» пишет present."""
+    code = service.create_group(conn, GROUP, STAROSTA_ID, "Абрамчик С.Г.")
+    service.join_group(conn, STUDENT_ID, code, "Иванов И.И.")
+    _open_check_poll(conn)
+    bot = AttendanceBot()
+
+    await dp.feed_update(
+        bot, _callback(f"att:check:{CHECK_DATE}:{CHECK_PARA}:yes", STUDENT_ID))
+
+    row = att.get_attendance(conn, GROUP, CHECK_DATE, CHECK_PARA,
+                                STUDENT_ID)
+    assert row["status"] == "present"
+    assert row["method"] == "self"
+    alert_text, _ = _alerts(bot)[-1]
+    assert "присутствующий" in alert_text
+
+
+async def test_check_no_marks_absent(dp, conn) -> None:
+    """Нажатие «Меня нет» сразу пишет absent."""
+    code = service.create_group(conn, GROUP, STAROSTA_ID, "Абрамчик С.Г.")
+    service.join_group(conn, STUDENT_ID, code, "Иванов И.И.")
+    _open_check_poll(conn)
+    bot = AttendanceBot()
+
+    await dp.feed_update(
+        bot, _callback(f"att:check:{CHECK_DATE}:{CHECK_PARA}:no", STUDENT_ID))
+
+    row = att.get_attendance(conn, GROUP, CHECK_DATE, CHECK_PARA,
+                                STUDENT_ID)
+    assert row["status"] == "absent"
+    alert_text, _ = _alerts(bot)[-1]
+    assert "отсутствующий" in alert_text
+
+
+async def test_check_second_press_refused(dp, conn) -> None:
+    """Повторное нажатие — «Ты уже ответил»."""
+    code = service.create_group(conn, GROUP, STAROSTA_ID, "Абрамчик С.Г.")
+    service.join_group(conn, STUDENT_ID, code, "Иванов И.И.")
+    _open_check_poll(conn)
+    bot = AttendanceBot()
+    await dp.feed_update(
+        bot, _callback(f"att:check:{CHECK_DATE}:{CHECK_PARA}:yes", STUDENT_ID))
+
+    await dp.feed_update(
+        bot, _callback(f"att:check:{CHECK_DATE}:{CHECK_PARA}:no", STUDENT_ID))
+
+    alert_text, _ = _alerts(bot)[-1]
+    assert "уже ответил" in alert_text
+    row = att.get_attendance(conn, GROUP, CHECK_DATE, CHECK_PARA,
+                                STUDENT_ID)
+    assert row["status"] == "present", "первый ответ не перезаписан"
+
+
+async def test_check_after_close_refused(dp, conn) -> None:
+    """После закрытия опроса кнопки не работают."""
+    code = service.create_group(conn, GROUP, STAROSTA_ID, "Абрамчик С.Г.")
+    service.join_group(conn, STUDENT_ID, code, "Иванов И.И.")
+    _open_check_poll(conn, closed=True)
+    bot = AttendanceBot()
+
+    await dp.feed_update(
+        bot, _callback(f"att:check:{CHECK_DATE}:{CHECK_PARA}:yes", STUDENT_ID))
+
+    alert_text, _ = _alerts(bot)[-1]
+    assert "закрыт" in alert_text
+    assert att.get_attendance(conn, GROUP, CHECK_DATE, CHECK_PARA,
+                                 STUDENT_ID) is None
+
+
+async def test_check_from_outsider_refused(dp, conn) -> None:
+    """Посторонний ответить не может."""
+    service.create_group(conn, GROUP, STAROSTA_ID, "Абрамчик С.Г.")
+    _open_check_poll(conn)
+    bot = AttendanceBot()
+
+    await dp.feed_update(
+        bot, _callback(f"att:check:{CHECK_DATE}:{CHECK_PARA}:yes", 999999))
+
+    alert_text, _ = _alerts(bot)[-1]
+    assert "не в группе" in alert_text.lower()
+
+
+async def test_check_bad_answer_ignored(dp, conn) -> None:
+    """Непонятный ответ (не yes/no) молча игнорируется."""
+    code = service.create_group(conn, GROUP, STAROSTA_ID, "Абрамчик С.Г.")
+    service.join_group(conn, STUDENT_ID, code, "Иванов И.И.")
+    _open_check_poll(conn)
+    bot = AttendanceBot()
+
+    await dp.feed_update(
+        bot, _callback(f"att:check:{CHECK_DATE}:{CHECK_PARA}:maybe",
+                       STUDENT_ID))
+
+    assert att.get_attendance(conn, GROUP, CHECK_DATE, CHECK_PARA,
+                                 STUDENT_ID) is None
+
+
+async def test_check_chat_mode_edits_message(dp, conn) -> None:
+    """В режиме чата сообщение-опрос обновляется."""
+    code = service.create_group(conn, GROUP, STAROSTA_ID, "Абрамчик С.Г.")
+    service.join_group(conn, STUDENT_ID, code, "Иванов И.И.")
+    _open_check_poll(conn)
+    with transaction(conn):
+        conn.execute("UPDATE attendance_polls SET message_id = 42")
+    bot = AttendanceBot()
+
+    await dp.feed_update(
+        bot, _callback(f"att:check:{CHECK_DATE}:{CHECK_PARA}:yes", STUDENT_ID))
+
+    assert any(m["method"] == "EditMessageText" for m in bot.sent)
+# --- экран «Режим посещаемости» ---
+
+async def test_att_mode_screen_for_starosta(dp, conn) -> None:
+    """Староста открывает экран режима."""
+    service.create_group(conn, GROUP, STAROSTA_ID, "Абрамчик С.Г.")
+    bot = AttendanceBot()
+
+    await dp.feed_update(bot, _callback(kb.CB_ATT_MODE, STAROSTA_ID))
+
+    body = " ".join(_texts(bot))
+    assert "Режим посещаемости" in body
+    assert "Текущий:" in body
+    labels = " | ".join(_buttons(bot))
+    assert "Личка" in labels and "Чат группы" in labels
+
+
+async def test_att_mode_denied_for_student(dp, conn) -> None:
+    """Обычный студент режим не открывает."""
+    code = service.create_group(conn, GROUP, STAROSTA_ID, "Абрамчик С.Г.")
+    service.join_group(conn, STUDENT_ID, code, "Иванов И.И.")
+    bot = AttendanceBot()
+
+    await dp.feed_update(bot, _callback(kb.CB_ATT_MODE, STUDENT_ID))
+
+    _, show_alert = _alerts(bot)[-1]
+    assert show_alert is True
+
+
+async def test_att_mode_switch_saves(dp, conn) -> None:
+    """Староста переключает режим — значение сохраняется."""
+    service.create_group(conn, GROUP, STAROSTA_ID, "Абрамчик С.Г.")
+    bot = AttendanceBot()
+
+    await dp.feed_update(
+        bot, _callback(f"{kb.CB_ATT_MODE}:direct", STAROSTA_ID))
+
+    assert att_db.get_attendance_mode(conn, GROUP) == "direct"
+    assert any("Личка" in t for t in _texts(bot))
+
+
+async def test_att_mode_switch_back(dp, conn) -> None:
+    """И обратно на чат группы."""
+    service.create_group(conn, GROUP, STAROSTA_ID, "Абрамчик С.Г.")
+    att_db.set_attendance_mode(conn, GROUP, "direct")
+    bot = AttendanceBot()
+
+    await dp.feed_update(bot, _callback(f"{kb.CB_ATT_MODE}:chat", STAROSTA_ID))
+
+    assert att_db.get_attendance_mode(conn, GROUP) == "chat"
+
+
+async def test_att_mode_switch_denied_for_student(dp, conn) -> None:
+    """Студент режим не меняет."""
+    code = service.create_group(conn, GROUP, STAROSTA_ID, "Абрамчик С.Г.")
+    service.join_group(conn, STUDENT_ID, code, "Иванов И.И.")
+    bot = AttendanceBot()
+
+    await dp.feed_update(
+        bot, _callback(f"{kb.CB_ATT_MODE}:direct", STUDENT_ID))
+
+    assert att_db.get_attendance_mode(conn, GROUP) == "chat"
+    _, show_alert = _alerts(bot)[-1]
+    assert show_alert is True
+
+
+async def test_att_mode_switch_active_poll_untouched(dp, conn) -> None:
+    """Смена режима не трогает уже созданный опрос.
+
+    Это ключевое требование ТЗ: режим применяется только к новым опросам,
+    потому что активный уже разослан по прежним правилам.
+    """
+    service.create_group(conn, GROUP, STAROSTA_ID, "Абрамчик С.Г.")
+    _open_check_poll(conn)      # опрос создан в режиме chat
+    bot = AttendanceBot()
+
+    await dp.feed_update(
+        bot, _callback(f"{kb.CB_ATT_MODE}:direct", STAROSTA_ID))
+
+    poll = att.get_poll(conn, GROUP, CHECK_DATE, CHECK_PARA)
+    assert poll["mode"] == "chat", "режим опроса фиксируется при создании"
+    assert att_db.get_attendance_mode(conn, GROUP) == "direct"
+
+
+async def test_manage_kb_has_mode_button(dp, conn) -> None:
+    """В «Управлении группой» появилась кнопка режима."""
+    service.create_group(conn, GROUP, STAROSTA_ID, "Абрамчик С.Г.")
+    bot = AttendanceBot()
+
+    await dp.feed_update(bot, _callback(kb.CB_MANAGE, STAROSTA_ID))
+
+    assert "Режим посещаемости" in " | ".join(_buttons(bot))
+
+
+# --- возврат «Моей посещаемости» в «Мою группу» ---
+
+async def test_student_kb_has_my_attendance_again(dp, conn) -> None:
+    """«📊 Моя посещаемость» вернулась в плитки студента."""
+    code = service.create_group(conn, GROUP, STAROSTA_ID, "Абрамчик С.Г.")
+    service.join_group(conn, STUDENT_ID, code, "Иванов И.И.")
+    bot = AttendanceBot()
+
+    await dp.feed_update(bot, _update(kb.BTN_MY_GROUP, STUDENT_ID))
+
+    labels = " | ".join(_buttons(bot))
+    assert "Моя посещаемость" in labels
+    assert "Отметиться на паре" in labels
+
+
+async def test_my_attendance_from_my_group_opens(dp, conn) -> None:
+    """Кнопка из «Моей группы» открывает тот же экран посещаемости."""
+    code = service.create_group(conn, GROUP, STAROSTA_ID, "Абрамчик С.Г.")
+    service.join_group(conn, STUDENT_ID, code, "Иванов И.И.")
+    bot = AttendanceBot()
+
+    await dp.feed_update(bot, _callback(kb.CB_MY_ATTENDANCE, STUDENT_ID))
+
+    body = " ".join(_texts(bot))
+    assert "Моя посещаемость" in body
