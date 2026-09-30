@@ -430,7 +430,11 @@ async def close_due_polls(conn, bot, now: datetime | None = None) -> int:
 
     return closed
 async def tick(conn, bot, now: datetime | None = None) -> dict:
-    """Один проход: закрыть истёкшие опросы и начать опросы текущей пары.
+    """Один проход: закрыть истёкшие опросы и голосования, начать опросы.
+
+    Голосования за посещаемость закрываются здесь же: у них своё время жизни
+    (начало пары + 45 минут), но отдельная фоновая задача с почти таким же
+    периодом была бы лишней — встроено в общий проход.
 
     Args:
         conn: соединение SQLite.
@@ -438,17 +442,19 @@ async def tick(conn, bot, now: datetime | None = None) -> dict:
         now: текущий момент (для тестов).
 
     Returns:
-        ``{'closed': N, 'started': M}``.
+        ``{'closed': N, 'started': M, 'votes_closed': K}``.
     """
     moment = now or datetime.now(KRASNOYARSK)
     today = moment.date()
 
     closed = await close_due_polls(conn, bot, moment)
+    votes_closed = await _close_due_votes(conn, bot, moment)
     started = 0
 
     para = current_para(moment)
     if para is None:
-        return {"closed": closed, "started": 0}
+        return {"closed": closed, "started": 0,
+                "votes_closed": votes_closed}
 
     for group in att_db.get_all_groups(conn):
         group_name = str(group["group_name"])
@@ -467,11 +473,25 @@ async def tick(conn, bot, now: datetime | None = None) -> dict:
         if result["ok"]:
             started += 1
 
-    if closed or started:
+    if closed or started or votes_closed:
         logger.info("attendance tick",
                     extra={"date": today.isoformat(), "para": para,
-                           "closed": closed, "started": started})
-    return {"closed": closed, "started": started}
+                           "closed": closed, "started": started,
+                           "votes_closed": votes_closed})
+    return {"closed": closed, "started": started,
+            "votes_closed": votes_closed}
+
+
+async def _close_due_votes(conn, bot, moment: datetime) -> int:
+    """Закрыть истёкшие голосования (ленивый импорт: избегаем цикла)."""
+    from bot.attendance import vote_service
+
+    try:
+        return await vote_service.close_due_vote_polls(conn, bot, moment)
+    except Exception:
+        # Ошибка голосований не должна ронять закрытие опросов.
+        logger.exception("closing due vote polls failed")
+        return 0
 
 
 def month_bounds(day: date) -> tuple[date, date]:

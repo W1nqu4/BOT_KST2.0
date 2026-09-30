@@ -92,6 +92,52 @@ CREATE_ATTENDANCE_POLLS_GROUP_INDEX = (
     " ON attendance_polls (group_name, date_iso)"
 )
 
+# --- голосование за посещаемость (миграция 13) ---
+
+# Таблица голосов: одна строка на пару (голосующий → за кого).
+#
+# Голос за себя разрешён (студент сам подтверждает, что был), поэтому в
+# UNIQUE нет запрета ``target_tg_id = voter_tg_id``: это осознанное решение
+# владельца проекта, а не недосмотр.
+CREATE_ATTENDANCE_VOTES = """
+    CREATE TABLE IF NOT EXISTS attendance_votes (
+        id               INTEGER PRIMARY KEY AUTOINCREMENT,
+        group_name       TEXT    NOT NULL,
+        date_iso         TEXT    NOT NULL,
+        para             INTEGER NOT NULL,
+        target_tg_id     INTEGER NOT NULL,
+        target_full_name TEXT    NOT NULL,
+        voter_tg_id      INTEGER NOT NULL,
+        voted_at         TEXT    NOT NULL,
+        UNIQUE (group_name, date_iso, para, target_tg_id, voter_tg_id)
+    )
+"""
+
+CREATE_ATTENDANCE_VOTES_TARGET_INDEX = (
+    "CREATE INDEX IF NOT EXISTS idx_attendance_votes_target"
+    " ON attendance_votes (group_name, date_iso, para, target_tg_id)"
+)
+
+# Таблица голосований: одно голосование на (группа, дата, пара).
+#
+# ``UNIQUE`` не даёт запустить второе голосование по той же паре, если
+# староста нажал кнопку дважды (или два прохода цикла совпали).
+CREATE_ATTENDANCE_VOTE_POLLS = """
+    CREATE TABLE IF NOT EXISTS attendance_vote_polls (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        group_name  TEXT    NOT NULL,
+        date_iso    TEXT    NOT NULL,
+        para        INTEGER NOT NULL,
+        chat_id     INTEGER NOT NULL,
+        message_id  INTEGER,
+        started_by  INTEGER NOT NULL,
+        started_at  TEXT    NOT NULL,
+        closes_at   TEXT    NOT NULL,
+        is_closed   INTEGER NOT NULL DEFAULT 0,
+        UNIQUE (group_name, date_iso, para)
+    )
+"""
+
 # Роли, которым доступны действия старосты (управление группой, назначение
 # зама). Зам может отмечать посещаемость, но не управлять группой.
 ADMIN_ROLES = frozenset({ROLE_STAROSTA})

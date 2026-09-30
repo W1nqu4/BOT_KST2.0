@@ -154,11 +154,12 @@ def test_starosta_kb_has_no_my_attendance() -> None:
 
 
 def test_starosta_kb_layout() -> None:
-    """Раскладка старосты — как в ТЗ."""
+    """Раскладка старосты — как в ТЗ (с кнопкой голосования)."""
     labels = [b.text for row in kb.my_group_starosta_kb().inline_keyboard
               for b in row]
     assert labels == [
         "✏️ Отметить вручную",
+        "📣 Запустить голосование",
         "📊 Отчёт за неделю",
         "⚙️ Управление группой",
         "📋 Список группы",

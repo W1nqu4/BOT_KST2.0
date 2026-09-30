@@ -11,6 +11,7 @@ from aiogram import Router
 from bot.attendance import admin_handlers as attendance_admin_handlers
 from bot.attendance import attendance_handlers as attendance_marks_handlers
 from bot.attendance import handlers as attendance_handlers
+from bot.attendance import vote_handlers as attendance_vote_handlers
 from bot.handlers import admin as admin_handlers
 from bot.handlers import calendar as calendar_handlers
 from bot.handlers import deadlines as deadlines_handlers
@@ -32,6 +33,7 @@ ROUTERS: tuple[Router, ...] = (
     start_handlers.router,
     attendance_handlers.router,
     attendance_marks_handlers.router,
+    attendance_vote_handlers.router,
     attendance_admin_handlers.router,
     group_chats_handlers.router,
     schedule_handlers.router,

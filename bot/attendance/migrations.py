@@ -18,6 +18,9 @@ from bot.attendance.models import (
     CREATE_ATTENDANCE_POLLS,
     CREATE_ATTENDANCE_POLLS_GROUP_INDEX,
     CREATE_ATTENDANCE_TG_ID_INDEX,
+    CREATE_ATTENDANCE_VOTES,
+    CREATE_ATTENDANCE_VOTES_TARGET_INDEX,
+    CREATE_ATTENDANCE_VOTE_POLLS,
     CREATE_STUDENTS,
     CREATE_STUDENTS_GROUP_INDEX,
     CREATE_STUDY_GROUPS,
@@ -87,3 +90,23 @@ def migrate_12_attendance_subject(conn: sqlite3.Connection) -> None:
     )}
     if "subject" not in columns:
         conn.execute("ALTER TABLE attendance ADD COLUMN subject TEXT")
+def migrate_13_attendance_votes(conn: sqlite3.Connection) -> None:
+    """Миграция 12 → 13: голосование за посещаемость.
+
+    ``attendance_votes`` — голоса «этот студент был на паре». Уникальный
+    ключ ``(group_name, date_iso, para, target_tg_id, voter_tg_id)`` не даёт
+    одному человеку проголосовать за одного и того же студента дважды.
+    Голос за себя разрешён решением владельца проекта (студент подтверждает,
+    что был) — поэтому в ключе нет ограничения на совпадение этих полей.
+
+    ``attendance_vote_polls`` — запущенные голосования: одно на пару
+    (``UNIQUE``), с временем закрытия ``closes_at`` (начало пары + 45 минут).
+    Закрытие делает фоновая задача (``attendance_loop``) или староста кнопкой.
+
+    Отдельная таблица от ``attendance_polls``: там опрос «кто на паре» с
+    кнопкой «Я на паре», здесь — голосование за других. Смешивать их нельзя,
+    у них разный жизненный цикл и разный смысл строки.
+    """
+    conn.execute(CREATE_ATTENDANCE_VOTES)
+    conn.execute(CREATE_ATTENDANCE_VOTES_TARGET_INDEX)
+    conn.execute(CREATE_ATTENDANCE_VOTE_POLLS)

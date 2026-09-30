@@ -12,6 +12,8 @@ from aiogram.types import (
     ReplyKeyboardMarkup,
 )
 
+from bot.attendance import vote_keyboards as vote_kb
+
 # Тексты кнопок главного меню (единый источник для обработчиков).
 BTN_SCHEDULE = "📆 Расписание"
 BTN_DEADLINES = "📝 Дедлайны"
@@ -99,10 +101,21 @@ def my_group_student_kb() -> InlineKeyboardMarkup:
 
 
 def my_group_starosta_kb() -> InlineKeyboardMarkup:
-    """Плитки старосты/зама: отметка вручную, отчёт, управление, список."""
+    """Плитки старосты/зама: отметка вручную, голосование, отчёт, управление.
+
+    Layout:
+        [✏️ Отметить вручную]
+        [📣 Запустить голосование]
+        [📊 Отчёт за неделю]
+        [⚙️ Управление группой]
+        [📋 Список группы]
+        [🏠 Меню]
+    """
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✏️ Отметить вручную",
                               callback_data=CB_MARK_MANUAL)],
+        [InlineKeyboardButton(text="📣 Запустить голосование",
+                              callback_data=vote_kb.CB_START)],
         [InlineKeyboardButton(text="📊 Отчёт за неделю",
                               callback_data=CB_REPORT)],
         [InlineKeyboardButton(text="⚙️ Управление группой",

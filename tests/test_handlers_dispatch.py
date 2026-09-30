@@ -149,9 +149,9 @@ def test_bot_commands_declared() -> None:
 def test_dispatcher_includes_conn(dp, conn) -> None:
     """Диспетчер отдаёт хендлерам соединение БД."""
     assert dp.workflow_data["conn"] is conn
-    # 12 роутеров: добавились attendance (регистрация), attendance_marks
-    # (отметки), attendance_admin и teacher (/teacher).
-    assert len(all_routers()) == 12
+    # 13 роутеров: добавились attendance (регистрация), attendance_marks
+    # (отметки), attendance_vote (голосование), attendance_admin и teacher.
+    assert len(all_routers()) == 13
 
 
 async def test_start_shows_greeting_without_asking_group(
