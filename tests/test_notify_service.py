@@ -559,7 +559,7 @@ async def test_process_chat_gets_full_schedule_not_cards(
     body = chat_messages[0]
 
     # Шапка группового формата с пометкой про замены и чётностью дня.
-    assert "🔔 <b>Замены на завтра · 26КАД</b>" in body
+    assert "🔔 <b>Расписание на завтра · 26КАД</b>" in body
     assert "Понедельник, 28.09.2026" in body
     assert "Число 28 →" in body
     assert "@kst24_bot" in body
@@ -810,12 +810,19 @@ async def test_process_ignores_inactive_users(conn_with_users) -> None:
 
 
 async def test_process_only_new_substitutions_sent(conn_with_users) -> None:
-    """Ранее отправленная замена не повторяется, новая — уходит."""
+    """Ранее отправленная замена не повторяется — и новая тоже.
+
+    Проверяем поведение из ТЗ: за вечер лист замен может обновиться несколько
+    раз, но студент получает ОДНО полное расписание на дату. Дедуп идёт по
+    ``(tg_id, дата)``, а не по подписи замены, поэтому новая замена в тот же
+    день повторной отправки не вызывает.
+    """
     _add_user(conn_with_users, USER_ID)
     _seed(conn_with_users, [SUB_FULL])
     bot1 = FakeBot()
     await ns._process_substitutions(conn_with_users, bot1, TARGET,
                                     throttle=False)
+    assert bot1.sent, "первое расписание ушло"
 
     new_sub = dict(SUB_FULL, para=3, old_subject="ОД.01 Русский язык",
                    new_subject="ОД.13 Биология")
@@ -825,8 +832,8 @@ async def test_process_only_new_substitutions_sent(conn_with_users) -> None:
     sent = await ns._process_substitutions(conn_with_users, bot2, TARGET,
                                            throttle=False)
 
-    assert sent == 1
-    assert "ОД.13 Биология" in bot2.sent[0].get("text", "")
+    assert sent == 0, "расписание на эту дату уже отправлено"
+    assert bot2.sent == []
 # --- notify_substitutions_loop ---
 
 async def test_loop_sleeps_outside_window(conn_with_users, monkeypatch) -> None:
@@ -1105,3 +1112,254 @@ async def test_no_pin_without_date(conn_chat) -> None:
 
     assert bot.pinned == []
     assert len(bot.sent) == 1
+# --- полное расписание в личку вместо карточек замен ---
+#
+# Проблема, которую закрывают эти тесты: студент получал только карточки
+# («❌ 1 пара ... Пара отменена») и не видел остального дня. Теперь и в личку,
+# и в чат уходит ПОЛНОЕ расписание на завтра с учётом замен.
+
+# Четверг: замена 2 пары (не отменена — так видно и 📚, и 🔁).
+FULL_TARGET = date(2026, 10, 1)
+
+
+def _full_schedule_users(tmp_path: Path, count: int = 2, name: str = "full.db"):
+    """БД с расписанием, заменой и несколькими пользователями группы.
+
+    Returns:
+        ``(conn, [tg_id, ...])``.
+    """
+    c = get_connection(tmp_path / name)
+    apply_migrations(c)
+    with transaction(c):
+        for para, subject in [(1, "История"), (2, "Литература"),
+                              (3, "Физика")]:
+            c.execute(
+                "INSERT INTO schedule_cache (group_name, day_of_week,"
+                " para_number, subject, teacher, room, week_type, updated_at)"
+                " VALUES ('26КАД', 4, ?, ?, 'Тест Т.Т.', '101', '', 'x')",
+                (para, subject),
+            )
+        c.execute(
+            "INSERT INTO substitutions_cache (group_name, date_iso, para,"
+            " old_subject, new_subject, teacher, room, is_cancelled,"
+            " is_self_study, fetched_at)"
+            " VALUES ('26КАД', ?, 2, 'Литература', 'ОД.11 Астрономия',"
+            " 'Кудрявцева П.А.', '307А', 0, 0, 'x')",
+            (FULL_TARGET.isoformat(),),
+        )
+        ids = []
+        for index in range(count):
+            tg_id = 9000 + index
+            c.execute(
+                "INSERT INTO users (tg_id, group_name, notifications_enabled,"
+                " created_at) VALUES (?, '26КАД', 1, 'x')", (tg_id,),
+            )
+            ids.append(tg_id)
+    return c, ids
+
+
+async def test_user_gets_full_not_cards(tmp_path: Path) -> None:
+    """В личку уходит ПОЛНОЕ расписание, а не карточки замен.
+
+    Проверяем оба признака: есть плановые пары (📚) и заменённые (🔁), и нет
+    старого формата «Пара отменена».
+    """
+    conn, ids = _full_schedule_users(tmp_path, count=1)
+    bot = FakeBot()
+
+    sent = await ns._process_substitutions(conn, bot, FULL_TARGET,
+                                           throttle=False)
+
+    assert sent == 1
+    body = "\n".join(m["text"] for m in bot.sent if m["text"])
+    assert "🔔 <b>Расписание на завтра · 26КАД</b>" in body
+    assert "🔁" in body, "заменённая пара"
+    assert "📚" in body, "плановая пара"
+    assert "ОД.11 Астрономия" in body
+    assert "Пара отменена" not in body, "старого формата быть не должно"
+    assert "Подробнее в боте: /schedule" in body, "футер для лички"
+    conn.close()
+
+
+async def test_user_schedule_header_replaced(tmp_path: Path) -> None:
+    """Заголовок «Замены на завтра» больше не используется в личке."""
+    conn, ids = _full_schedule_users(tmp_path, count=1)
+    bot = FakeBot()
+
+    await ns._process_substitutions(conn, bot, FULL_TARGET, throttle=False)
+
+    body = "\n".join(m["text"] for m in bot.sent if m["text"])
+    assert "Замены на завтра" not in body
+    assert "Расписание на завтра" in body
+    conn.close()
+
+
+async def test_two_users_both_get_one_message(tmp_path: Path) -> None:
+    """Двое студентов получают по одному сообщению каждый."""
+    conn, ids = _full_schedule_users(tmp_path, count=2)
+    bot = FakeBot()
+
+    sent = await ns._process_substitutions(conn, bot, FULL_TARGET,
+                                           throttle=False)
+
+    assert sent == 2
+    recipients = [m["chat_id"] for m in bot.sent if m.get("chat_id")]
+    assert sorted(recipients) == sorted(ids)
+    conn.close()
+async def test_second_run_same_day_sends_nothing(tmp_path: Path) -> None:
+    """Повторный прогон в тот же день — 0 отправок (дедуп по tg_id и дате)."""
+    conn, ids = _full_schedule_users(tmp_path, count=1)
+    bot = FakeBot()
+    await ns._process_substitutions(conn, bot, FULL_TARGET, throttle=False)
+    bot.sent.clear()
+
+    again = await ns._process_substitutions(conn, bot, FULL_TARGET,
+                                            throttle=False)
+
+    assert again == 0
+    assert bot.sent == []
+    conn.close()
+
+
+async def test_new_substitution_same_day_no_resend(tmp_path: Path) -> None:
+    """Новая замена в тот же день не присылает расписание повторно.
+
+    Требование ТЗ: даже если лист замен обновился несколько раз за вечер,
+    студент получает ОДНО полное расписание на дату.
+    """
+    conn, ids = _full_schedule_users(tmp_path, count=1)
+    bot = FakeBot()
+    await ns._process_substitutions(conn, bot, FULL_TARGET, throttle=False)
+    bot.sent.clear()
+
+    with transaction(conn):
+        conn.execute(
+            "INSERT INTO substitutions_cache (group_name, date_iso, para,"
+            " old_subject, new_subject, teacher, room, is_cancelled,"
+            " is_self_study, fetched_at)"
+            " VALUES ('26КАД', ?, 3, 'Физика', 'ОД.99 Астрономия',"
+            " 'Т.Т.', '202', 0, 0, 'x')", (FULL_TARGET.isoformat(),),
+        )
+    again = await ns._process_substitutions(conn, bot, FULL_TARGET,
+                                            throttle=False)
+
+    assert again == 0, "расписание на эту дату уже отправлено"
+    conn.close()
+
+
+def test_dedup_signature_is_per_user() -> None:
+    """Подпись дедупа включает tg_id — иначе первый закрыл бы группу."""
+    sig_first = ns.full_schedule_signature(111, FULL_TARGET.isoformat())
+    sig_second = ns.full_schedule_signature(222, FULL_TARGET.isoformat())
+
+    assert sig_first != sig_second
+    assert FULL_TARGET.isoformat() in sig_first
+
+
+async def test_forbidden_user_deactivated_other_gets(tmp_path: Path) -> None:
+    """Блокировка бота одним студентом не мешает второму."""
+    from aiogram.exceptions import TelegramForbiddenError
+
+    conn, ids = _full_schedule_users(tmp_path, count=2)
+    blocked = ids[0]
+
+    class BlockingBot(FakeBot):
+        """Падает с TelegramForbiddenError для одного получателя."""
+
+        async def __call__(self, method, request_timeout=None):
+            name = type(method).__name__
+            chat_id = getattr(method, "chat_id", None)
+            if name == "SendMessage" and chat_id == blocked:
+                raise TelegramForbiddenError(method=method, message="blocked")
+            return await super().__call__(method, request_timeout)
+
+    bot = BlockingBot()
+    sent = await ns._process_substitutions(conn, bot, FULL_TARGET,
+                                           throttle=False)
+
+    assert sent == 1, "второй студент получил"
+    row = conn.execute(
+        "SELECT is_active FROM users WHERE tg_id = ?", (blocked,)
+    ).fetchone()
+    assert row["is_active"] == 0
+    conn.close()
+
+
+async def test_empty_day_message_for_user(tmp_path: Path) -> None:
+    """Пар нет на завтра → «🎉 На завтра пар нет».
+
+    Проверяем саму функцию сборки: замена на день без пар создала бы «пару
+    вне плана», и тест проверял бы не пустой день, а карточку замены.
+    """
+    conn, ids = _full_schedule_users(tmp_path, count=1)
+    empty = date(2026, 9, 6)      # воскресенье: в расписании пары нет
+
+    texts = ns.build_full_schedule_for_target(conn, "26КАД", empty,
+                                              for_chat=False)
+
+    assert len(texts) == 1
+    assert "На завтра пар нет" in texts[0]
+    conn.close()
+# --- build_full_schedule_for_target: личка против чата ---
+
+async def test_target_footers_differ(tmp_path: Path) -> None:
+    """Футер различается: личка → /schedule, чат → ссылка на бота."""
+    conn, ids = _full_schedule_users(tmp_path, count=1)
+
+    personal = ns.build_full_schedule_for_target(conn, "26КАД", FULL_TARGET,
+                                                 for_chat=False)
+    chat = ns.build_full_schedule_for_target(conn, "26КАД", FULL_TARGET,
+                                             for_chat=True)
+
+    assert "Подробнее в боте: /schedule" in personal[0]
+    assert "Подробности — в боте в личке: @kst24_bot" in chat[0]
+    conn.close()
+
+
+async def test_target_body_is_same_for_both(tmp_path: Path) -> None:
+    """Тело расписания совпадает: различается только футер."""
+    conn, ids = _full_schedule_users(tmp_path, count=1)
+
+    personal = ns.build_full_schedule_for_target(conn, "26КАД", FULL_TARGET,
+                                                 for_chat=False)[0]
+    chat = ns.build_full_schedule_for_target(conn, "26КАД", FULL_TARGET,
+                                             for_chat=True)[0]
+
+    assert personal.rsplit("\n", 1)[0] == chat.rsplit("\n", 1)[0]
+    conn.close()
+
+
+async def test_chat_wrapper_respects_flag(tmp_path: Path) -> None:
+    """Обёртка для чата не шлёт ничего, если новых замен нет."""
+    conn, ids = _full_schedule_users(tmp_path, count=1)
+
+    assert ns.build_full_schedule_for_chat(conn, "26КАД", FULL_TARGET,
+                                           False) == []
+    assert ns.build_full_schedule_for_chat(conn, "26КАД", FULL_TARGET, True)
+    conn.close()
+
+
+async def test_chat_gets_full_schedule_too(tmp_path: Path) -> None:
+    """Чат группы получает то же полное расписание (не карточки)."""
+    conn, ids = _full_schedule_users(tmp_path, count=1)
+    chat_id = -100900
+    db.add_group_chat(conn, chat_id, "Группа", "group", "26КАД", ids[0])
+    bot = FakeBot()
+
+    await ns._process_substitutions(conn, bot, FULL_TARGET, throttle=False)
+
+    chat_msgs = [m["text"] for m in bot.sent
+                 if m.get("chat_id") == chat_id and m["text"]]
+    assert chat_msgs, "в чат тоже ушло расписание"
+    body = "\n".join(chat_msgs)
+    assert "Расписание на завтра" in body
+    assert "🔁" in body and "📚" in body
+    assert "Подробности — в боте в личке: @kst24_bot" in body
+    conn.close()
+
+
+async def test_old_render_still_available() -> None:
+    """Старая функция карточек замен не удалена (используется в других местах)."""
+    assert callable(ns.render_substitution_notification)
+    texts = ns.render_substitution_notification("26КАД", [], FULL_TARGET)
+    assert texts == []

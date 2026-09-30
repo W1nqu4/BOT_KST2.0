@@ -473,32 +473,48 @@ async def _send_to_user(conn, bot, tg_id: int, texts: list[str]) -> bool:
         return False
 
 
-def build_full_schedule_for_chat(conn, group: str, target: date,
-                                 new_subs_anyway: bool) -> list[str]:
-    """Полное расписание на дату для группового чата/канала.
+def full_schedule_signature(tg_id: int, date_iso: str) -> str:
+    """Подпись «пользователь получил расписание на дату» для дедупликации.
 
-    В чатах и каналах отправляем не карточки замен (как в личке), а всё
-    расписание на завтра — так его читают и те, кто не подписан на бота
-    лично, и замена видна в контексте дня.
+    Включает ``tg_id``: ключ ``sent_notifications`` —
+    ``(group_name, signature, notify_date)``, то есть подпись помечает
+    отправку ДЛЯ ГРУППЫ. Без ``tg_id`` первый же получатель закрыл бы
+    рассылку для всей группы (та же логика, что в напоминаниях о паре).
+
+    Args:
+        tg_id: получатель.
+        date_iso: дата расписания (та же, что ``notify_date``).
+
+    Returns:
+        Подпись для :func:`bot.db.is_substitution_sent`.
+    """
+    return f"full_schedule_user:{date_iso}:{tg_id}"
+
+
+def build_full_schedule_for_target(conn, group: str, target: date,
+                                   for_chat: bool = False) -> list[str]:
+    """Полное расписание на дату с учётом замен — для лички и для чата.
+
+    Одна функция на оба случая: и студенту в личку, и в чат группы уходит
+    ПОЛНОЕ расписание, а не карточки замен. Так замена видна в контексте дня,
+    а получатель понимает, что ещё стоит в расписании.
+
+    Различие только в подписи внизу: в личке уместно «/schedule», в чужом
+    чате — ссылка на бота (там команды бота могут быть недоступны).
 
     Карточки собирает :func:`bot.handlers.schedule.render_day`, поэтому
-    иконки 📚/🔁/❌/📖 и порядок строк совпадают с личкой и экраном бота.
+    иконки 📚/🔁/❌/📖 и порядок строк совпадают с экраном бота.
 
     Args:
         conn: соединение SQLite.
         group: имя группы КСТ.
         target: дата расписания (обычно завтра).
-        new_subs_anyway: слать ли расписание, когда новых замен нет.
-            False (нет новых замен) → пустой список: иначе каждые 15 минут
-            в чат уходило бы одно и то же расписание.
+        for_chat: True — сообщение для группового чата/канала.
 
     Returns:
-        Список сообщений (одно или несколько, с разбивкой по 4096 символов);
-        пустой список — если отправлять нечего.
+        Список сообщений (одно или несколько, с разбивкой по 4096 символов).
+        Для дня без пар — одно сообщение «🎉 На завтра пар нет».
     """
-    if not new_subs_anyway:
-        return []
-
     # Импорт внутри функции: ``bot.handlers.schedule`` тянет aiogram-хендлеры,
     # а ``notify_service`` импортируется из ``bot.main`` — иначе получился бы
     # цикл на этапе загрузки модулей.
@@ -512,11 +528,12 @@ def build_full_schedule_for_chat(conn, group: str, target: date,
     lessons = apply_substitutions(conn, lessons, group, target)
 
     header = (
-        f"🔔 <b>Замены на завтра · {escape(group)}</b>\n"
+        f"🔔 <b>Расписание на завтра · {escape(group)}</b>\n"
         f"<i>{escape(weekday_name(target))}, {target.strftime('%d.%m.%Y')} · "
         f"Число {target.day} → {escape(week_type_for_date(target))}</i>"
     )
-    footer = "<i>Подробности — в боте в личке: @kst24_bot</i>"
+    footer = ("<i>Подробности — в боте в личке: @kst24_bot</i>" if for_chat
+              else "<i>Подробнее в боте: /schedule</i>")
 
     if not lessons:
         empty = (
@@ -527,10 +544,34 @@ def build_full_schedule_for_chat(conn, group: str, target: date,
         return [empty]
 
     # render_day даёт готовую шапку и карточки; берём только «хвост» карточек,
-    # чтобы своя шапка (с пометкой про замены) осталась на месте.
+    # чтобы своя шапка (с пометкой про расписание) осталась на месте.
     rendered = render_day(group, target, lessons)
     blocks = [block for block in rendered.split("\n\n")[1:] if block]
     return split_blocks(header, blocks, footer)
+
+
+def build_full_schedule_for_chat(conn, group: str, target: date,
+                                 new_subs_anyway: bool) -> list[str]:
+    """Полное расписание на дату для группового чата/канала.
+
+    Обёртка над :func:`build_full_schedule_for_target` с сохранённым
+    параметром «слать ли»: вызывающие (ежедневная рассылка и замены) решают
+    это сами, а флаг ``new_subs_anyway=False`` означает «новых замен нет».
+
+    Args:
+        conn: соединение SQLite.
+        group: имя группы КСТ.
+        target: дата расписания (обычно завтра).
+        new_subs_anyway: слать ли расписание, когда новых замен нет.
+            False → пустой список: иначе каждые 15 минут в чат уходило бы
+            одно и то же расписание.
+
+    Returns:
+        Список сообщений; пустой, если отправлять нечего.
+    """
+    if not new_subs_anyway:
+        return []
+    return build_full_schedule_for_target(conn, group, target, for_chat=True)
 
 
 async def unpin_previous(bot, conn, chat_id: int) -> None:
@@ -683,8 +724,19 @@ async def _process_substitutions(conn, bot, target: date,
     1. берём группы, у которых есть активные пользователи;
     2. для каждой группы читаем замены на дату и отбрасываем уже отправленные
        (по подписи в ``sent_notifications``);
-    3. если есть новые — рассылаем их пользователям группы и помечаем
-       отправленными.
+    3. если есть новые — рассылаем ПОЛНОЕ расписание на завтра: в личку
+       каждому подписчику, в чат группы — один раз на дату.
+
+    Что именно уходит: студент получает всё расписание дня с учётом замен
+    (:func:`build_full_schedule_for_target`), а не карточки «❌ пара отменена»:
+    без остальных пар карточка не даёт понять, что за день его ждёт.
+
+    Дедупликация двух уровней:
+
+    - по замене (``substitution_signature``) — чтобы один и тот же лист не
+      обрабатывался повторно;
+    - по получателю и дате (``full_schedule_signature``) — чтобы обновление
+      листа в течение вечера не присылало студенту расписание второй раз.
 
     Args:
         conn: соединение SQLite.
@@ -719,17 +771,31 @@ async def _process_substitutions(conn, bot, target: date,
         if not new_subs:
             continue
 
-        texts = render_substitution_notification(group, new_subs, target)
-        if not texts:
-            continue
-
+        # --- Личка: ПОЛНОЕ расписание на завтра, а не карточки замен ---
+        #
+        # Студент должен видеть весь день, а не только изменившиеся пары:
+        # карточка «❌ 1 пара отменена» без остального расписания бесполезна.
+        #
+        # Дедупликация — по (tg_id, дата): за вечер лист замен может
+        # обновиться несколько раз, но расписание на завтра приходит ОДИН раз.
+        # Подпись включает tg_id, иначе первый получатель закрыл бы рассылку
+        # для всей группы (та же ловушка, что была в напоминаниях о паре).
+        targets = build_full_schedule_for_target(conn, group, target,
+                                                 for_chat=False)
         user_ids = db.get_users_by_group(conn, group)
         for tg_id in user_ids:
             # Уважаем настройку пользователя: он мог отключить уведомления.
             if not db.get_notifications_enabled(conn, tg_id):
                 continue
+
+            signature = full_schedule_signature(tg_id, date_iso)
+            if db.is_substitution_sent(conn, group, signature, date_iso):
+                continue      # уже получил расписание на эту дату
+
             async with semaphore:
-                if await _send_to_user(conn, bot, tg_id, texts):
+                if await _send_to_user(conn, bot, tg_id, targets):
+                    db.mark_substitution_sent(conn, group, signature,
+                                              date_iso)
                     sent += 1
                 if throttle and NOTIFY_SEND_DELAY_SECONDS:
                     await asyncio.sleep(NOTIFY_SEND_DELAY_SECONDS)
