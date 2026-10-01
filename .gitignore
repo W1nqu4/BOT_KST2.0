@@ -34,3 +34,9 @@ data/backups/
 
 # Временные диагностические скрипты (создаются под задачи, не коммитим)
 _diag*.py
+
+# Mini App (Next.js): исходники коммитим, сборку — нет.
+# out/ собирается внутри Docker на стадии frontend и в git не нужен.
+webapp/node_modules/
+webapp/.next/
+webapp/out/
