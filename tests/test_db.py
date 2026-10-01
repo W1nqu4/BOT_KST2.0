@@ -478,3 +478,66 @@ def test_transaction_path_mode_persists_and_closes(tmp_path: Path) -> None:
         assert count == 1
     finally:
         fresh.close()
+# --- создание директории БД при подключении ---
+#
+# Зачем: на Railway том монтируется в /app/data, и если директории нет
+# (том примонтирован не туда или путь задан иначе), SQLite падал бы с
+# «unable to open database file». get_connection обязан создать её сам.
+
+def test_get_connection_creates_parent_directory(tmp_path: Path) -> None:
+    """get_connection создаёт родительскую директорию, если её нет."""
+    missing = tmp_path / "nested" / "missing"
+    assert not missing.exists()
+
+    c = get_connection(missing / "test.db")
+    try:
+        assert missing.is_dir(), "директория создана"
+        # Соединение рабочее: запись в только что созданную папку проходит.
+        c.execute("CREATE TABLE probe (id INTEGER)")
+        c.execute("INSERT INTO probe (id) VALUES (1)")
+        assert c.execute("SELECT id FROM probe").fetchone()["id"] == 1
+    finally:
+        c.close()
+
+
+def test_get_connection_works_in_nested_folder(tmp_path: Path) -> None:
+    """Путь во вложенной папке: миграции и запись работают."""
+    db_file = tmp_path / "data" / "cache" / "deep" / "bot.db"
+
+    c = get_connection(db_file)
+    try:
+        version = apply_migrations(c)
+        assert version == max(MIGRATIONS)
+        _insert_user(c)
+        row = c.execute(
+            "SELECT group_name FROM users WHERE tg_id = ?", (123456,)
+        ).fetchone()
+        assert row["group_name"] == "26КАД"
+    finally:
+        c.close()
+
+    assert db_file.exists(), "файл БД создался во вложенной папке"
+
+
+def test_get_connection_existing_directory_untouched(tmp_path: Path) -> None:
+    """Существующая директория не мешает (mkdir с exist_ok)."""
+    existing = tmp_path / "already"
+    existing.mkdir()
+    marker = existing / "keep.txt"
+    marker.write_text("не удалять", encoding="utf-8")
+
+    c = get_connection(existing / "test.db")
+    try:
+        assert marker.read_text(encoding="utf-8") == "не удалять"
+    finally:
+        c.close()
+
+
+def test_get_connection_memory_has_no_directory(tmp_path: Path) -> None:
+    """Для :memory: директория не создаётся (это не путь к файлу)."""
+    c = get_connection(":memory:")
+    try:
+        apply_migrations(c)
+        assert get_schema_version(c) == max(MIGRATIONS)
+    finally:
+        c.close()

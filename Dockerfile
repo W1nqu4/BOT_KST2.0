@@ -25,13 +25,18 @@ COPY --from=builder /opt/venv /opt/venv
 COPY bot/ ./bot/
 COPY run.py ./
 
-# Непривилегированный пользователь: контейнер не должен работать от root.
 # /app/data — точка монтирования персистентного тома (БД, кэш, бэкапы).
-RUN useradd -r -u 1000 app && \
-    mkdir -p /app/data && \
-    chown -R app /app
+#
+# Работаем от root: на Railway контейнер изолирован, а Volume при
+# монтировании поверх /app/data приходит с владельцем root:root — под
+# uid 1000 писать в него нельзя, и SQLite падал бы с
+# «unable to open database file».
+RUN mkdir -p /app/data && chmod -R 777 /app/data
 
-USER app
+# USER app — убран намеренно: Volume в Railway принадлежит root,
+# а смена владельца тома из контейнера не работает.
+# Вернуть изоляцию: добавить обратно useradd + USER app и
+# убедиться, что хостинг отдаёт том пользователю uid 1000.
 
 # EXPOSE — только документация порта; сервер слушает значение из env PORT.
 EXPOSE 8080
