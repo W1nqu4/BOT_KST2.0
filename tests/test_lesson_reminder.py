@@ -534,3 +534,113 @@ async def test_weekly_warning_all_attested_has_no_block(conn) -> None:
     text = _texts(bot)[0]
     assert "Под угрозой неаттестации" not in text, \
         f"остались долги: {text}"
+# --- учёт замен в напоминании ---
+#
+# Проблема, которую закрывают тесты: напоминание приходило и на отменённую
+# пару, а предмет/кабинет не отражали замену.
+
+def _add_substitution(conn, para: int, *, old: str = "ОД.07 Математика",
+                      new: str = "", teacher: str = "", room: str = "",
+                      cancelled: int = 0, self_study: int = 0) -> None:
+    """Вставить замену на 1 пару в понедельник (дату фикстуры)."""
+    with transaction(conn):
+        conn.execute(
+            "INSERT INTO substitutions_cache (group_name, date_iso, para,"
+            " old_subject, new_subject, teacher, room, is_cancelled,"
+            " is_self_study, fetched_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'x')",
+            (GROUP, MONDAY.isoformat(), para, old, new, teacher, room,
+             cancelled, self_study),
+        )
+
+
+async def test_cancelled_lesson_not_reminded(conn) -> None:
+    """Отменённая пара напоминания не вызывает."""
+    _add_substitution(conn, 1, cancelled=1, new="")
+    bot = ReminderBot()
+
+    sent = await lrs.check_reminders(
+        conn, bot, now=datetime(2026, 9, 28, 8, 55, 10)
+    )
+
+    assert sent == 0
+    assert _texts(bot) == []
+
+
+async def test_cancelled_only_for_one_group(conn) -> None:
+    """Отмена у 25КАД не мешает напоминанию другому студенту той же пары.
+
+    В фикстуре 2 пара есть только у 26КАД, поэтому проверяем парную ситуацию:
+    отмена 1 пары у 25КАД, а напоминание о 1 паре нужно только ему — и оно
+    не уходит. Второй студент (26КАД) в это время пары не имеет.
+    """
+    _add_substitution(conn, 1, cancelled=1, new="")
+    bot = ReminderBot()
+
+    sent = await lrs.check_reminders(
+        conn, bot, now=datetime(2026, 9, 28, 8, 55, 10)
+    )
+
+    # USER_3 в 26КАД: 1 пары у его группы нет вовсе — напоминаний ноль.
+    assert sent == 0
+    assert _texts(bot) == []
+
+
+async def test_substituted_lesson_uses_new_subject_and_room(conn) -> None:
+    """Замена без отмены: в напоминании новый предмет и кабинет."""
+    _add_substitution(conn, 1, new="ОД.11 Астрономия",
+                      teacher="Кудрявцева П.А.", room="307А")
+    bot = ReminderBot()
+
+    sent = await lrs.check_reminders(
+        conn, bot, now=datetime(2026, 9, 28, 8, 55, 10)
+    )
+
+    assert sent == 2
+    text = _texts(bot)[0]
+    assert "ОД.11 Астрономия" in text
+    assert "307А" in text
+    assert "ОД.07 Математика" not in text, "старый предмет не показываем"
+
+
+async def test_unchanged_lesson_still_reminded(conn) -> None:
+    """Без замен напоминание приходит как раньше."""
+    bot = ReminderBot()
+
+    sent = await lrs.check_reminders(
+        conn, bot, now=datetime(2026, 9, 28, 8, 55, 10)
+    )
+
+    assert sent == 2
+    assert "ОД.07 Математика" in _texts(bot)[0]
+
+
+async def test_self_study_lesson_not_reminded(conn) -> None:
+    """Самостоятельная работа — не пара с преподавателем, не напоминаем.
+
+    Решение зафиксировано в :func:`check_reminders` комментарием: чтобы вернуть
+    напоминания для самостоятельной работы, достаточно убрать ту проверку.
+    """
+    _add_substitution(conn, 1, new="Самостоятельная работа", self_study=1)
+    bot = ReminderBot()
+
+    sent = await lrs.check_reminders(
+        conn, bot, now=datetime(2026, 9, 28, 8, 55, 10)
+    )
+
+    assert sent == 0
+    assert _texts(bot) == []
+
+
+async def test_other_para_reminder_unaffected_by_cancellation(conn) -> None:
+    """Отмена 1 пары не мешает напоминанию о 3 паре."""
+    _add_substitution(conn, 1, cancelled=1, new="")
+    bot = ReminderBot()
+
+    # 13:10 — «минус 5» для 3 пары (13:15).
+    sent = await lrs.check_reminders(
+        conn, bot, now=datetime(2026, 9, 28, 13, 10, 10)
+    )
+
+    assert sent == 2
+    assert "3 пара" in _texts(bot)[0]

@@ -175,11 +175,43 @@ async def cmd_stats_denied(message: Message) -> None:
 
 @router.message(Command("reparse"), IsAdmin())
 async def cmd_reparse(message: Message, conn) -> None:
-    """Принудительно обновить расписание и лист замен (только админ)."""
-    await message.answer("🔄 Обновляю источники…")
+    """Принудительно обновить расписание и лист замен (только админ).
 
-    lessons = await cache_service.refresh_schedule(conn)
-    subs = await cache_service.refresh_substitutions(conn)
+    Обе функции ``cache_service`` асинхронные (внутри — скачивание по HTTP),
+    поэтому вызываются напрямую: ``asyncio.to_thread`` здесь не подходит — он
+    предназначен для синхронных функций и вернул бы корутину, а не результат.
+
+    Отчёт содержит числа и время: админу важно видеть, что данные обновились
+    и сколько это заняло. Отрицательное число от ``cache_service`` означает
+    «скачать не удалось, кэш не тронут» — показываем это словами, а не «-1».
+
+    История замен сохраняется внутри ``refresh_substitutions`` — отдельный
+    вызов не нужен (см. :func:`bot.services.cache_service.refresh_substitutions`).
+    """
+    import time
+
+    await message.answer("🔄 <b>Принудительный перепарсинг</b>\n"
+                         "<i>Скачиваю расписание и лист замен…</i>",
+                         parse_mode="HTML")
+    started = time.monotonic()
+
+    try:
+        lessons = await cache_service.refresh_schedule(conn)
+        subs = await cache_service.refresh_substitutions(conn)
+    except Exception as exc:
+        # Падение не должно оставлять админа без ответа: он не знает, упало
+        # или просто долго.
+        logger.exception("reparse failed")
+        await message.answer(
+            f"❌ <b>Ошибка перепарсинга</b>\n\n<code>{escape(str(exc))}</code>",
+            parse_mode="HTML",
+        )
+        return
+
+    elapsed = time.monotonic() - started
+    groups = conn.execute(
+        "SELECT COUNT(DISTINCT group_name) FROM schedule_cache"
+    ).fetchone()[0]
 
     def _line(title: str, count: int, unit: str) -> str:
         if count < 0:
@@ -187,10 +219,11 @@ async def cmd_reparse(message: Message, conn) -> None:
         return f"{title}: <b>{count}</b> {unit}"
 
     await message.answer(
-        "✅ <b>Обновление завершено</b>\n"
-        + _line("🗓 Расписание", lessons, "занятий")
-        + "\n"
-        + _line("🔔 Замены", subs, "строк"),
+        "🔄 <b>Принудительный перепарсинг</b>\n\n"
+        + _line("📆 Расписание", lessons, "занятий")
+        + f", <b>{int(groups)}</b> групп\n"
+        + _line("🔔 Замены", subs, "строк")
+        + f"\n⏱ Заняло: {elapsed:.1f} сек",
         parse_mode="HTML",
     )
 

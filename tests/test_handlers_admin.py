@@ -392,7 +392,7 @@ async def test_broadcast_counts_errors(conn) -> None:
 # --- /reparse ---
 
 async def test_reparse_reports_counts(dp, conn, monkeypatch) -> None:
-    """/reparse вызывает cache_service и сообщает числа."""
+    """/reparse вызывает cache_service и сообщает числа, группы и время."""
     async def fake_schedule(connection, session=None, directory=None):
         return 1456
 
@@ -401,19 +401,77 @@ async def test_reparse_reports_counts(dp, conn, monkeypatch) -> None:
 
     monkeypatch.setattr(cache_service, "refresh_schedule", fake_schedule)
     monkeypatch.setattr(cache_service, "refresh_substitutions", fake_subs)
+    with transaction(conn):
+        for name in ("25КАД", "26КАД", "26МЭГ"):
+            conn.execute(
+                "INSERT INTO schedule_cache (group_name, day_of_week,"
+                " para_number, subject, teacher, room, week_type, updated_at)"
+                " VALUES (?, 1, 1, 'ОД.01', 'Т.Т.', '1', '', 'x')", (name,),
+            )
 
     bot = FakeBot()
     await dp.feed_update(bot, _update("/reparse", ADMIN_ID))
 
     texts = _texts(bot)
-    assert any("Обновляю источники" in t for t in texts)
-    report = next(t for t in texts if "Обновление завершено" in t)
+    assert any("Принудительный перепарсинг" in t for t in texts)
+    report = next(t for t in texts if "Расписание:" in t)
     assert "1456" in report
     assert "78" in report
+    assert "<b>3</b> групп" in report, "число групп из кэша"
+    assert "Заняло" in report, "время выполнения"
+    assert "сек" in report
+
+
+async def test_reparse_counts_groups_from_cache(dp, conn, monkeypatch) -> None:
+    """Число групп считается по кэшу расписания, а не берётся из отчёта."""
+    async def fake(connection, session=None, directory=None):
+        return 10
+
+    monkeypatch.setattr(cache_service, "refresh_schedule", fake)
+    monkeypatch.setattr(cache_service, "refresh_substitutions", fake)
+    with transaction(conn):
+        for name in ("25КАД", "26КАД"):
+            conn.execute(
+                "INSERT INTO schedule_cache (group_name, day_of_week,"
+                " para_number, subject, teacher, room, week_type, updated_at)"
+                " VALUES (?, 1, 1, 'ОД.01', 'Т.Т.', '1', '', 'x')", (name,),
+            )
+
+    bot = FakeBot()
+    await dp.feed_update(bot, _update("/reparse", ADMIN_ID))
+
+    report = next(t for t in _texts(bot) if "Расписание:" in t)
+    assert "<b>2</b> групп" in report
+
+
+async def test_reparse_denied_for_non_admin(dp, conn) -> None:
+    """/reparse от не-админа — нейтральный ответ, без чисел."""
+    bot = FakeBot()
+    await dp.feed_update(bot, _update("/reparse", USER_ID))
+
+    texts = _texts(bot)
+    assert not any("перепарсинг" in t.lower() for t in texts)
+    assert not any("Расписание:" in t for t in texts)
+
+
+async def test_reparse_reports_exception(dp, conn, monkeypatch) -> None:
+    """Исключение при обновлении показывается админу, а не роняет бота."""
+    async def exploding(connection, session=None, directory=None):
+        raise RuntimeError("источник недоступен")
+
+    monkeypatch.setattr(cache_service, "refresh_schedule", exploding)
+
+    bot = FakeBot()
+    await dp.feed_update(bot, _update("/reparse", ADMIN_ID))
+
+    texts = _texts(bot)
+    report = next(t for t in texts if "Ошибка" in t)
+    assert "источник недоступен" in report
+    assert "Расписание:" not in report, "чисел при ошибке нет"
 
 
 async def test_reparse_reports_errors(dp, conn, monkeypatch) -> None:
-    """Ошибка обновления отражается в отчёте, а не падением."""
+    """Отрицательный результат cache_service — «ошибка (кэш не изменён)»."""
     async def failing(connection, session=None, directory=None):
         return -1
 
@@ -423,6 +481,7 @@ async def test_reparse_reports_errors(dp, conn, monkeypatch) -> None:
     bot = FakeBot()
     await dp.feed_update(bot, _update("/reparse", ADMIN_ID))
 
-    report = next(t for t in _texts(bot) if "Обновление завершено" in t)
+    report = next(t for t in _texts(bot) if "Расписание:" in t)
     assert report.count("ошибка") == 2
+    assert "Заняло" in report
     return [m["text"] for m in bot.sent if m["text"]]

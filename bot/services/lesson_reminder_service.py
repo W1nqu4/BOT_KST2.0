@@ -35,7 +35,11 @@ from bot.config import (
     BELL_TIMES_WEEKDAY,
     KRASNOYARSK,
 )
-from bot.services.schedule_service import _sleep, get_lessons_for_day
+from bot.services.schedule_service import (
+    _sleep,
+    apply_substitutions,
+    get_lessons_for_day,
+)
 from bot.utils.text import plural_ru
 
 logger = logging.getLogger(__name__)
@@ -194,6 +198,14 @@ async def check_reminders(conn, bot, now: datetime | None = None,
                           minutes_before: int = 5) -> int:
     """Разослать напоминания о паре, до которой ``minutes_before`` минут.
 
+    Занятие берётся из расписания С УЧЁТОМ ЗАМЕН
+    (:func:`bot.services.schedule_service.apply_substitutions`), поэтому:
+
+    - отменённая пара (``is_cancelled``) напоминания не вызывает — идти некуда;
+    - самостоятельная работа (``is_self_study``) тоже пропускается: это не
+      пара с преподавателем;
+    - предмет, кабинет и время в тексте — из замены, если она была.
+
     Args:
         conn: соединение SQLite.
         bot: объект Bot.
@@ -221,11 +233,27 @@ async def check_reminders(conn, bot, now: datetime | None = None,
             continue
 
         lessons = get_lessons_for_day(conn, group, today)
+        # Накладываем лист замен: без этого напоминание приходило бы и на
+        # отменённую пару, а предмет/кабинет/время могли измениться заменой.
+        lessons = apply_substitutions(conn, lessons, group, today)
         lesson = next(
             (item for item in lessons if int(item["para_number"]) == para),
             None,
         )
         if lesson is None:
+            continue
+
+        # Отменённую пару не напоминаем: идти некуда.
+        if lesson.get("is_cancelled"):
+            logger.info("lesson reminder skipped (cancelled)",
+                        extra={"group": group, "date": date_iso, "para": para})
+            continue
+
+        # Самостоятельная работа — не пара с преподавателем, будильник по ней
+        # только мешает. Вернуть напоминания для неё: убрать эту проверку.
+        if lesson.get("is_self_study"):
+            logger.info("lesson reminder skipped (self study)",
+                        extra={"group": group, "date": date_iso, "para": para})
             continue
 
         text = lesson_reminder_text(para, lesson, moment.weekday())
