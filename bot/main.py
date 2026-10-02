@@ -25,7 +25,12 @@ from aiogram import BaseMiddleware, Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.types import BotCommand, MenuButtonDefault, TelegramObject
+from aiogram.types import (
+    BotCommand,
+    MenuButtonWebApp,
+    TelegramObject,
+    WebAppInfo,
+)
 from aiohttp import web
 
 from bot.config import ConfigError, Settings
@@ -59,6 +64,14 @@ logger = logging.getLogger(__name__)
 # Пауза перед повторным запуском polling после сетевой ошибки, сек.
 POLLING_RESTART_DELAY = 10
 
+# --- Кнопка меню (Mini App) ---
+#
+# Подпись кнопки в меню Telegram (слева от поля ввода) и путь Mini App от
+# корня. Путь обязан совпадать с basePath в webapp/next.config.mjs: иначе
+# откроется index.html, а его ассеты уйдут в 404.
+MENU_BUTTON_TEXT = "Расписание"
+MENU_BUTTON_PATH = "/app/"
+
 # Команды, которые Telegram показывает в меню («/»).
 BOT_COMMANDS: tuple[BotCommand, ...] = (
     BotCommand(command="start", description="Начать / сменить группу"),
@@ -72,32 +85,62 @@ BOT_COMMANDS: tuple[BotCommand, ...] = (
 )
 
 
-async def reset_menu_button(bot) -> bool:
-    """Сбросить кнопку меню Telegram к значению по умолчанию.
+async def setup_menu_button(bot, settings, webapp_path: str = MENU_BUTTON_PATH) -> bool:
+    """Поставить кнопку меню Telegram, открывающую Mini App.
 
-    Раньше у бота была кнопка-Web App («Расписание»), ведущая на старый URL:
-    Mini App не разрабатывался, папки ``webapp/dist`` и ``/app/`` не существует,
-    поэтому кнопка открывала 503. Расписание внутри бота работает через
-    reply-клавиатуру и inline-кнопки — отдельный Web App не нужен.
+    Раньше бот сбрасывал кнопку в :class:`MenuButtonDefault`: Web App не
+    существовал, и кнопка-наследство вела на несуществующий ``/app/`` (503).
+    Теперь Mini App собирается в ``webapp/out`` и раздаётся ботом по ``/app/``,
+    поэтому кнопка снова нужна.
 
-    Кнопка задаётся в BotFather, но ``set_chat_menu_button`` с
-    :class:`MenuButtonDefault` перекрывает её при каждом старте, поэтому
-    ручная правка в BotFather не требуется.
+    Адрес берётся из ``settings.public_base_url`` — он уже нормализован
+    (:func:`bot.config.normalize_base_url` добавляет схему). Telegram требует
+    для Web App именно HTTPS, поэтому адрес на ``http://`` отклоняется на
+    нашей стороне: без звука падать в проде не хочется.
+
+    Кнопка задаётся в BotFather, но ``set_chat_menu_button`` перекрывает её при
+    каждом старте — ручная правка в BotFather не нужна.
 
     Args:
         bot: экземпляр :class:`aiogram.Bot`.
+        settings: настройки приложения (нужен ``public_base_url``).
+        webapp_path: путь Mini App от корня (по умолчанию ``/app/``).
 
     Returns:
-        True, если кнопка сброшена; False — если Telegram не ответил
-        (не критично: бот продолжает работать, в логе остаётся предупреждение).
+        True, если кнопка поставлена; False — если адрес не задан/не HTTPS или
+        Telegram не ответил (не критично: бот продолжает работать, в логе
+        остаётся предупреждение).
     """
+    base_url = str(getattr(settings, "public_base_url", "") or "").strip()
+    if not base_url:
+        logger.warning("menu button: public_base_url is not set — skipped")
+        return False
+    if not base_url.startswith("https://"):
+        # Telegram не примет Web App по http: кнопку не ставим, говорим об этом
+        # в логе. Локально (localhost) это ожидаемо и не мешает работе бота.
+        logger.warning(
+            "menu button: public_base_url is not https — skipped",
+            extra={"public_base_url": base_url},
+        )
+        return False
+
+    url = f"{base_url.rstrip('/')}{webapp_path}"
     try:
-        await bot.set_chat_menu_button(menu_button=MenuButtonDefault())
+        await bot.set_chat_menu_button(
+            menu_button=MenuButtonWebApp(
+                text=MENU_BUTTON_TEXT,
+                web_app=WebAppInfo(url=url),
+            )
+        )
     except Exception as exc:
         # Сетевые сбои и «menu button is not modified» не должны ронять старт.
-        logger.warning("could not reset menu button", extra={"error": repr(exc)})
+        logger.warning(
+            "could not set menu button",
+            extra={"error": repr(exc), "url": url},
+        )
         return False
-    logger.info("menu button reset to default")
+
+    logger.info("menu button set", extra={"url": url})
     return True
 
 
@@ -370,9 +413,9 @@ async def run_bot(settings: Settings, conn, shutdown_event=None) -> None:
         await bot.session.close()
         raise SystemExit(4) from exc
 
-    # Кнопка меню: убираем унаследованный Web App на старый URL (падал 503).
-    # Ошибка здесь не критична — бот продолжит работать (см. reset_menu_button).
-    await reset_menu_button(bot)
+    # Кнопка меню: открывает Mini App («Расписание» слева от поля ввода).
+    # Ошибка здесь не критична — бот продолжит работать (см. setup_menu_button).
+    await setup_menu_button(bot, settings)
 
     web_runner = await start_web_server(conn, settings)
     if web_runner is None:

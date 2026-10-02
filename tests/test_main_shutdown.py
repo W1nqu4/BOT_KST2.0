@@ -248,34 +248,68 @@ async def test_run_bot_sets_commands(conn, monkeypatch) -> None:
     ]
 
 
-# --- кнопка меню (Menu Button) ---
+# --- кнопка меню (Mini App) ---
 
-async def test_reset_menu_button_sends_default(monkeypatch) -> None:
-    """Сброс кнопки меню отправляет MenuButtonDefault."""
+class _WebAppSettings:
+    """Настройки с HTTPS-адресом: только такой принимает Telegram."""
+
+    public_base_url = "https://kst24-kst24.up.railway.app"
+
+
+async def test_setup_menu_button_opens_miniapp() -> None:
+    """Кнопка меню открывает Mini App по /app/ с HTTPS-адресом."""
     import bot.main as main_module
-    from aiogram.types import MenuButtonDefault as Expected
+    from aiogram.types import MenuButtonWebApp as Expected
 
     bot = RecordingBot()
-    result = await main_module.reset_menu_button(bot)
+    result = await main_module.setup_menu_button(bot, _WebAppSettings())
 
     assert result is True
     assert isinstance(bot.menu_button, Expected)
-    assert bot.menu_button.type == "default"
-    assert bot.menu_button.web_app is None, "Web App не должен остаться"
+    assert bot.menu_button.type == "web_app"
+    assert bot.menu_button.text == "Расписание"
+    assert bot.menu_button.web_app.url == (
+        "https://kst24-kst24.up.railway.app/app/"
+    ), "URL обязан оканчиваться на /app/ — он совпадает с basePath фронта"
 
 
-async def test_reset_menu_button_is_not_webapp() -> None:
-    """Кнопка меню не содержит WebAppInfo (именно она вела на старый URL)."""
+async def test_setup_menu_button_url_has_single_slash() -> None:
+    """Лишний слэш в public_base_url не даёт «//app/» в адресе."""
     import bot.main as main_module
 
+    class TrailingSlashSettings:
+        public_base_url = "https://example.test/"
+
     bot = RecordingBot()
-    await main_module.reset_menu_button(bot)
-
-    assert getattr(bot.menu_button, "web_app", None) is None
-    assert getattr(bot.menu_button, "text", None) is None
+    assert await main_module.setup_menu_button(bot, TrailingSlashSettings()) is True
+    assert bot.menu_button.web_app.url == "https://example.test/app/"
 
 
-async def test_reset_menu_button_survives_telegram_error() -> None:
+async def test_setup_menu_button_skips_without_base_url() -> None:
+    """Пустой public_base_url: кнопку не ставим, но и не падаем."""
+    import bot.main as main_module
+
+    class EmptySettings:
+        public_base_url = ""
+
+    bot = RecordingBot()
+    assert await main_module.setup_menu_button(bot, EmptySettings()) is False
+    assert bot.menu_calls == [], "вызов в Telegram не должен уходить"
+
+
+async def test_setup_menu_button_skips_http() -> None:
+    """http:// отклоняется: Telegram принимает Web App только по HTTPS."""
+    import bot.main as main_module
+
+    class LocalSettings:
+        public_base_url = "http://localhost:8080"
+
+    bot = RecordingBot()
+    assert await main_module.setup_menu_button(bot, LocalSettings()) is False
+    assert bot.menu_calls == []
+
+
+async def test_setup_menu_button_survives_telegram_error() -> None:
     """Ошибка Telegram не роняет старт: возвращаем False."""
     import bot.main as main_module
 
@@ -283,11 +317,13 @@ async def test_reset_menu_button_survives_telegram_error() -> None:
         async def set_chat_menu_button(self, **kwargs):
             raise RuntimeError("Telegram недоступен")
 
-    assert await main_module.reset_menu_button(BrokenBot()) is False
+    assert await main_module.setup_menu_button(
+        BrokenBot(), _WebAppSettings()
+    ) is False
 
 
-async def test_run_bot_resets_menu_button(conn, monkeypatch) -> None:
-    """При старте бот сбрасывает кнопку меню (в логе «menu button reset»)."""
+async def test_run_bot_sets_menu_button(conn, monkeypatch) -> None:
+    """При старте бот ставит кнопку меню, ведущую в Mini App."""
     import bot.main as main_module
 
     class FakeRunner:
@@ -307,8 +343,12 @@ async def test_run_bot_resets_menu_button(conn, monkeypatch) -> None:
     event.set()
     await asyncio.wait_for(runner, timeout=5)
 
-    assert len(fake_bot.menu_calls) == 1, "кнопка меню должна сбрасываться один раз"
-    assert getattr(fake_bot.menu_button, "web_app", None) is None
+    assert len(fake_bot.menu_calls) == 1, "кнопка меню должна ставиться один раз"
+
+    # Адрес берётся из settings.public_base_url (в фикстуре — https://bot.example)
+    # и всегда ведёт на /app/ — этот путь совпадает с basePath фронта.
+    assert fake_bot.menu_button.type == "web_app"
+    assert fake_bot.menu_button.web_app.url == "https://bot.example/app/"
 
 
 async def test_install_signal_handlers_is_safe() -> None:
