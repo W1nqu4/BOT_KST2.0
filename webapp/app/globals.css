@@ -17,8 +17,36 @@
   --color-tg-destructive: var(--tgui--destructive_text_color);
   --color-tg-divider: var(--tgui--divider);
   --color-tg-fill: var(--tgui--secondary_fill);
-  --color-tg-warning: #f59e0b;
-  --color-tg-success: #31b545;
+  /*
+   * Статусные цвета — через переменные, а не литералами: значения внутри
+   * @theme inline подставляются как есть, поэтому переопределить их в .dark
+   * напрямую нельзя. Схема: @theme inline ссылается на --kst-*, а светлые и
+   * тёмные оттенки задаются ниже в :root и .dark.
+   */
+  --color-tg-warning: var(--kst-warning);
+  --color-tg-success: var(--kst-success);
+  --color-tg-danger: var(--kst-danger);
+  --color-tg-accent: var(--kst-accent);
+}
+
+/*
+ * Статусные цвета KST для светлой темы. Telegram подменяет только свои
+ * переменные (--tgui--*), поэтому оттенки «успех/предупреждение/ошибка»
+ * задаём сами — в тёмной теме они светлее, иначе на тёмном фоне читаются
+ * плохо.
+ */
+:root {
+  --kst-warning: #f59e0b;
+  --kst-success: #31b545;
+  --kst-danger: #e53935;
+  --kst-accent: #2481cc;
+}
+
+.dark {
+  --kst-warning: #fbbf24;
+  --kst-success: #4ade80;
+  --kst-danger: #f87171;
+  --kst-accent: #4a9eda;
 }
 
 /* KST brand accent; Telegram overrides these with inline theme params when running inside the client. */

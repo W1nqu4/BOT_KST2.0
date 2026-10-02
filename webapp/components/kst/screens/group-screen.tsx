@@ -16,15 +16,14 @@ import {
   type LucideIcon,
 } from 'lucide-react'
 import {
-  ROLE_LABEL,
   SELF_ID,
   STUDENT,
   generateInviteCode,
-  permissions,
   type AttendanceMode,
   type GroupMember,
-  type Role,
 } from '@/lib/kst-data'
+import { ROLE_LABEL, permissions } from '@/lib/roles'
+import type { Role } from '@/lib/api-types'
 import { haptic, notify } from '@/lib/telegram'
 import { cn } from '@/lib/utils'
 
@@ -157,11 +156,11 @@ export function GroupScreen({ role, members, onMembersChange, mode, onModeChange
 
       {can.isAdmin && (
         <Section header="Администрирование">
-          <AdminCell icon={UsersRound} tile="bg-[#2481cc]" text="Все пользователи бота" />
-          <AdminCell icon={Megaphone} tile="bg-[#f59e0b]" text="Рассылка всем студентам" />
-          <AdminCell icon={RefreshCw} tile="bg-[#8b5cf6]" text="Принудительный парсинг" />
-          <AdminCell icon={Database} tile="bg-[#31b545]" text="Скачать бэкап БД" />
-          <AdminCell icon={Trash2} tile="bg-[#e53935]" text="Удалить группу" />
+          <AdminCell icon={UsersRound} tile="bg-tg-button" text="Все пользователи бота" />
+          <AdminCell icon={Megaphone} tile="bg-tg-warning" text="Рассылка всем студентам" />
+          <AdminCell icon={RefreshCw} tile="bg-tg-accent" text="Принудительный парсинг" />
+          <AdminCell icon={Database} tile="bg-tg-success" text="Скачать бэкап БД" />
+          <AdminCell icon={Trash2} tile="bg-tg-danger" text="Удалить группу" />
         </Section>
       )}
     </List>

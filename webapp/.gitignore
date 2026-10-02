@@ -13,3 +13,11 @@ __v0_jsx-dev-runtime.ts
 node_modules
 .next/
 .DS_Store
+
+# Статический экспорт (output: 'export'): собирается на стадии frontend в Docker,
+# в git не нужен.
+/out/
+
+# Генерируется `next dev` / `next build`.
+next-env.d.ts
+*.tsbuildinfo

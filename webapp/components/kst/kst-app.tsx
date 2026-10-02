@@ -1,22 +1,15 @@
 'use client'
 
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import { AppRoot, Tabbar } from '@telegram-apps/telegram-ui'
 import { CalendarDays, ChartColumn, House, ListTodo, UserRound, type LucideIcon } from 'lucide-react'
-import {
-  GROUP_MEMBERS,
-  INITIAL_DEADLINES,
-  STUDENT,
-  generateInviteCode,
-  type AttendanceMode,
-  type Deadline,
-  type Role,
-} from '@/lib/kst-data'
-import { MarkScreen } from './screens/mark-screen'
-import { VoteScreen } from './screens/vote-screen'
-import { ReportScreen } from './screens/report-screen'
-import { GroupScreen } from './screens/group-screen'
-import { haptic, useTelegramBackButton, useTelegramInit } from '@/lib/telegram'
+
+import type { Profile } from '@/lib/api-types'
+import { GROUP_MEMBERS, generateInviteCode, type AttendanceMode, type GroupMember } from '@/lib/kst-data'
+import { permissions } from '@/lib/roles'
+import { haptic, notify, useTelegramBackButton, useTelegramInit } from '@/lib/telegram'
+import { useApi } from '@/lib/use-api'
+import { useTheme } from '@/lib/use-theme'
 import { ScreenHeader } from './screen-header'
 import { HomeScreen } from './screens/home-screen'
 import { WeekScreen } from './screens/week-screen'
@@ -25,6 +18,10 @@ import { AddDeadlineScreen } from './screens/add-deadline-screen'
 import { AttendanceScreen } from './screens/attendance-screen'
 import { ProfileScreen } from './screens/profile-screen'
 import { EditNameScreen } from './screens/edit-name-screen'
+import { GroupScreen } from './screens/group-screen'
+import { MarkScreen } from './screens/mark-screen'
+import { ReportScreen } from './screens/report-screen'
+import { VoteScreen } from './screens/vote-screen'
 
 type TabKey = 'home' | 'week' | 'deadlines' | 'attendance' | 'profile'
 type ScreenKey = TabKey | 'add-deadline' | 'edit-name' | 'mark' | 'vote' | 'report' | 'group'
@@ -65,16 +62,27 @@ const PARENT_TAB: Record<ScreenKey, TabKey> = {
   group: 'attendance',
 }
 
+/**
+ * Корневой компонент Mini App: таббар, стек экранов и тема.
+ *
+ * Роль берётся из ``/api/profile``: от неё зависит, показывать ли функции
+ * старосты (отметки, голосование, отчёт). Стек экранов — обычный ``useState``,
+ * без роутера: маршрутизация не нужна, а back-кнопку Telegram подключаем сами.
+ */
 export function KstApp() {
   useTelegramInit()
+  useTheme()
 
   const [stack, setStack] = useState<ScreenKey[]>(['home'])
-  const [deadlines, setDeadlines] = useState<Deadline[]>(INITIAL_DEADLINES)
-  const [name, setName] = useState(STUDENT.name)
-  const [role, setRole] = useState<Role>('starosta')
+  const profile = useApi<Profile>('/api/profile')
+  // Локальное состояние моков функций старосты (до появления /api/group).
+  const [members, setMembers] = useState<GroupMember[]>(GROUP_MEMBERS)
   const [mode, setMode] = useState<AttendanceMode>('chat')
-  const [members, setMembers] = useState(GROUP_MEMBERS)
   const [inviteCode, setInviteCode] = useState(generateInviteCode)
+  const [localName, setLocalName] = useState<string | null>(null)
+
+  const role = profile.data?.role ?? 'student'
+  const can = useMemo(() => permissions(role), [role])
 
   const current = stack[stack.length - 1]
   const activeTab = PARENT_TAB[current]
@@ -89,30 +97,28 @@ export function KstApp() {
 
   useTelegramBackButton(canGoBack, goBack)
 
+  // Ссылку на бота из Mini App дать нельзя — объясняем, где выбрать группу.
+  const explainGroup = () =>
+    notify('Откройте чат с ботом и отправьте /start — он попросит номер группы. После этого расписание появится здесь.')
+
   return (
     <AppRoot className="min-h-dvh bg-tg-secondary-bg text-tg-text">
       <div className="mx-auto flex min-h-dvh max-w-md flex-col">
         <ScreenHeader title={TITLES[current]} onBack={canGoBack ? goBack : undefined} />
 
-        <main key={current} className="flex-1 pb-28 animate-in fade-in slide-in-from-right-3 duration-300">
-          {current === 'home' && <HomeScreen />}
+        <main key={current} className="flex-1 animate-in pb-28 duration-300 fade-in slide-in-from-right-3">
+          {current === 'home' && <HomeScreen onNeedGroup={explainGroup} />}
           {current === 'week' && <WeekScreen />}
-          {current === 'deadlines' && (
-            <DeadlinesScreen
-              deadlines={deadlines}
-              onAdd={() => push('add-deadline')}
-              onToggleDone={(id) => setDeadlines((list) => list.filter((d) => d.id !== id))}
-            />
-          )}
+          {current === 'deadlines' && <DeadlinesScreen onAdd={() => push('add-deadline')} />}
           {current === 'add-deadline' && (
             <AddDeadlineScreen
-              onSubmit={(deadline) => {
-                setDeadlines((list) => [...list, deadline])
-                goBack()
+              onCreated={(created) => {
+                notify(`Дедлайн «${created.task}» сохранён`)
+                setStack(['home', 'deadlines'])
               }}
             />
           )}
-          {current === 'attendance' && <AttendanceScreen role={role} mode={mode} onOpen={push} />}
+          {current === 'attendance' && <AttendanceScreen onOpen={push} />}
           {current === 'mark' && <MarkScreen members={members} />}
           {current === 'vote' && <VoteScreen members={members} />}
           {current === 'report' && <ReportScreen />}
@@ -127,14 +133,13 @@ export function KstApp() {
               onInviteCodeChange={setInviteCode}
             />
           )}
-          {current === 'profile' && (
-            <ProfileScreen name={name} role={role} onRoleChange={setRole} onEditName={() => push('edit-name')} />
-          )}
+          {current === 'profile' && <ProfileScreen onEditName={() => push('edit-name')} />}
           {current === 'edit-name' && (
             <EditNameScreen
-              initialName={name}
+              initialName={localName ?? profile.data?.name ?? ''}
               onSubmit={(value) => {
-                setName(value)
+                setLocalName(value)
+                notify('Имя сохранено в приложении. Чтобы изменить его для бота, напишите в чат.')
                 goBack()
               }}
             />
@@ -145,9 +150,9 @@ export function KstApp() {
       <Tabbar>
         {TABS.map(({ key, label, icon: Icon }) => (
           <Tabbar.Item
-              key={key}
-              className="!px-0.5 [&_span]:!overflow-visible [&_span]:!text-[11px] [&_span]:!whitespace-nowrap [&_span]:![text-overflow:clip]"
-              text={label}
+            key={key}
+            className="!px-0.5 [&_span]:![text-overflow:clip] [&_span]:!whitespace-nowrap [&_span]:overflow-visible [&_span]:text-[11px]"
+            text={label}
             selected={activeTab === key}
             onClick={() => selectTab(key)}
             aria-current={activeTab === key ? 'page' : undefined}

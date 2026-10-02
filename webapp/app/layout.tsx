@@ -1,4 +1,3 @@
-import { Analytics } from '@vercel/analytics/next'
 import type { Metadata, Viewport } from 'next'
 import { Inter } from 'next/font/google'
 import Script from 'next/script'
@@ -11,22 +10,25 @@ export const metadata: Metadata = {
   title: 'КСТ — студенческий бот',
   description: 'Расписание, дедлайны и посещаемость студентов Красноярского строительного техникума в Telegram',
   generator: 'v0.app',
+  // Next 16 при output: 'export' не добавляет basePath к путям иконок, поэтому
+  // префикс /app/ указан явно — иначе браузер запрашивает /icon.svg и получает
+  // 404 (файлы лежат в /app/). Путь совпадает с basePath в next.config.mjs.
   icons: {
     icon: [
       {
-        url: '/icon-light-32x32.png',
+        url: '/app/icon-light-32x32.png',
         media: '(prefers-color-scheme: light)',
       },
       {
-        url: '/icon-dark-32x32.png',
+        url: '/app/icon-dark-32x32.png',
         media: '(prefers-color-scheme: dark)',
       },
       {
-        url: '/icon.svg',
+        url: '/app/icon.svg',
         type: 'image/svg+xml',
       },
     ],
-    apple: '/apple-icon.png',
+    apple: '/app/apple-icon.png',
   },
 }
 
@@ -52,10 +54,7 @@ export default function RootLayout({
       <head>
         <Script src="https://telegram.org/js/telegram-web-app.js" strategy="beforeInteractive" />
       </head>
-      <body className="antialiased">
-        {children}
-        {process.env.NODE_ENV === 'production' && <Analytics />}
-      </body>
+      <body className="antialiased">{children}</body>
     </html>
   )
 }

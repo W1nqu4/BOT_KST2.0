@@ -6,6 +6,11 @@ type TelegramWebApp = {
   ready: () => void
   expand: () => void
   initData: string
+  /** Схема оформления клиента: тема Mini App должна следовать за ней. */
+  colorScheme?: 'light' | 'dark'
+  /** Подписка/отписка на события WebApp (themeChanged, viewportChanged). */
+  onEvent?: (event: string, handler: () => void) => void
+  offEvent?: (event: string, handler: () => void) => void
   BackButton: {
     show: () => void
     hide: () => void

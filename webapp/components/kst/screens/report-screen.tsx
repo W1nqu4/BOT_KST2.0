@@ -1,3 +1,5 @@
+'use client'
+
 import { List, Section } from '@telegram-apps/telegram-ui'
 import { CircleAlert, CircleCheck, CircleX } from 'lucide-react'
 import { STUDENT, WEEK_REPORT, plural } from '@/lib/kst-data'

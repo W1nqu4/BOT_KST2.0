@@ -1,25 +1,29 @@
 import { Ban, BookOpen, NotebookPen, Repeat2, type LucideIcon } from 'lucide-react'
-import type { LessonStatus } from '@/lib/kst-data'
+import type { LessonStatus } from '@/lib/api-types'
 import { cn } from '@/lib/utils'
 
+/**
+ * Вид пары по её статусу. Ключи совпадают со статусами бэкенда
+ * (``bot/api/serializers.py``), поэтому отдельного преобразования не нужно.
+ */
 export const STATUS_META: Record<
   LessonStatus,
   { label: string; icon: LucideIcon; className: string; textClassName: string }
 > = {
-  plan: { label: 'По плану', icon: BookOpen, className: 'bg-tg-fill text-tg-link', textClassName: 'text-tg-link' },
-  replace: {
+  planned: { label: 'По плану', icon: BookOpen, className: 'bg-tg-fill text-tg-link', textClassName: 'text-tg-link' },
+  substituted: {
     label: 'Замена',
     icon: Repeat2,
     className: 'bg-tg-warning/15 text-tg-warning',
     textClassName: 'text-tg-warning',
   },
-  cancel: {
+  cancelled: {
     label: 'Отмена',
     icon: Ban,
-    className: 'bg-tg-destructive/15 text-tg-destructive',
-    textClassName: 'text-tg-destructive',
+    className: 'bg-tg-danger/15 text-tg-danger',
+    textClassName: 'text-tg-danger',
   },
-  self: {
+  self_study: {
     label: 'Самостоятельная',
     icon: NotebookPen,
     className: 'bg-tg-success/15 text-tg-success',

@@ -1,84 +1,93 @@
 'use client'
 
 import { Avatar, Cell, List, Section } from '@telegram-apps/telegram-ui'
-import { Bug, CalendarSync, ChevronRight, GraduationCap, Pencil, ShieldCheck, type LucideIcon } from 'lucide-react'
-import { ROLE_LABEL, STUDENT, type Role } from '@/lib/kst-data'
-import { haptic, notify } from '@/lib/telegram'
+import { Bell, Bug, CalendarSync, ChevronRight, GraduationCap, Pencil, ShieldCheck, type LucideIcon } from 'lucide-react'
+
+import type { Profile, Role } from '@/lib/api-types'
+import { ROLE_LABEL } from '@/lib/roles'
+import { useApi } from '@/lib/use-api'
+import { notify } from '@/lib/telegram'
 import { cn } from '@/lib/utils'
+import { ErrorState, SkeletonList } from '../async-state'
 
-const ROLES: Role[] = ['student', 'deputy', 'starosta', 'admin']
+type Props = { onEditName: () => void }
 
-type Props = { name: string; role: Role; onRoleChange: (role: Role) => void; onEditName: () => void }
+/**
+ * Профиль студента: имя, группа и роль из ``/api/profile``.
+ *
+ * Роль больше не переключается вручную (в макете была демо-кнопка «просмотр
+ * как»): её задаёт бэкенд — ``students.role`` или ``ADMIN_IDS``. Показывать
+ * студенту кнопки управления группой нельзя.
+ */
+export function ProfileScreen({ onEditName }: Props) {
+  const { data, loading, error, refresh } = useApi<Profile>('/api/profile')
 
-export function ProfileScreen({ name, role, onRoleChange, onEditName }: Props) {
+  if (loading && !data) return <SkeletonList rows={3} />
+  if (error && !data) return <ErrorState message={error} onRetry={refresh} />
+
+  const name = data?.name || 'Студент'
   const initials = name
     .split(' ')
-    .map((p) => p[0])
+    .map((part) => part[0])
     .join('')
     .slice(0, 2)
     .toUpperCase()
+  const role: Role = data?.role ?? 'student'
 
   return (
     <List>
       <section className="flex flex-col items-center gap-2 pt-4 pb-2 text-center">
-        <Avatar size={96} acronym={initials} />
+        <Avatar size={96} acronym={initials || 'КСТ'} />
         <h2 className="mt-1 text-2xl font-bold text-balance">{name}</h2>
-        <p className="text-sm text-tg-hint">{STUDENT.username}</p>
         <div className="flex gap-2">
-          <span className="rounded-full bg-tg-section px-3 py-1 text-sm font-semibold">{STUDENT.group}</span>
+          {data?.group && (
+            <span className="rounded-full bg-tg-section px-3 py-1 text-sm font-semibold">{data.group}</span>
+          )}
           <span className="rounded-full bg-tg-fill px-3 py-1 text-sm font-semibold text-tg-link">{ROLE_LABEL[role]}</span>
         </div>
       </section>
 
       <Section header="Информация">
-        <Cell before={<IconTile icon={GraduationCap} className="bg-[#2481cc]" />} after={<span className="text-tg-hint">{STUDENT.group}</span>}>
+        <Cell
+          before={<IconTile icon={GraduationCap} className="bg-tg-button" />}
+          after={<span className="text-tg-hint">{data?.group || '—'}</span>}
+        >
           Группа
         </Cell>
-        <Cell before={<IconTile icon={ShieldCheck} className="bg-[#31b545]" />} after={<span className="text-tg-hint">{ROLE_LABEL[role]}</span>}>
+        <Cell
+          before={<IconTile icon={ShieldCheck} className="bg-tg-success" />}
+          after={<span className="text-tg-hint">{ROLE_LABEL[role]}</span>}
+        >
           Роль
         </Cell>
       </Section>
 
-      <Section header="Просмотр как" footer="Демо: переключи роль, чтобы увидеть, что доступно каждому во вкладке «Явка».">
-        <div className="grid grid-cols-2 gap-2 p-3" role="radiogroup" aria-label="Роль">
-          {ROLES.map((r) => (
-            <button
-              key={r}
-              type="button"
-              role="radio"
-              aria-checked={role === r}
-              onClick={() => {
-                haptic()
-                onRoleChange(r)
-              }}
-              className={cn(
-                'h-10 rounded-xl text-sm font-semibold transition-colors',
-                role === r ? 'bg-tg-button text-tg-button-text' : 'bg-tg-secondary-bg text-tg-text',
-              )}
-            >
-              {ROLE_LABEL[r]}
-            </button>
-          ))}
-        </div>
-      </Section>
-
       <Section header="Настройки">
         <Cell
-          before={<IconTile icon={Pencil} className="bg-[#f59e0b]" />}
+          before={<IconTile icon={Pencil} className="bg-tg-warning" />}
           after={<ChevronRight className="size-5 text-tg-hint" aria-hidden="true" />}
           onClick={onEditName}
         >
           Изменить имя
         </Cell>
         <Cell
-          before={<IconTile icon={CalendarSync} className="bg-[#2481cc]" />}
+          before={<IconTile icon={CalendarSync} className="bg-tg-button" />}
           after={<ChevronRight className="size-5 text-tg-hint" aria-hidden="true" />}
-          onClick={() => notify('Ссылка для подписки на календарь скопирована. Добавьте её в Google или Apple Календарь.')}
+          onClick={() =>
+            notify('Ссылка для подписки на календарь приходит в чате с ботом: «Настройки» → «Календарь».')
+          }
         >
           Интеграция с календарём
         </Cell>
         <Cell
-          before={<IconTile icon={Bug} className="bg-[#e53935]" />}
+          before={<IconTile icon={Bell} className="bg-tg-accent" />}
+          after={<ChevronRight className="size-5 text-tg-hint" aria-hidden="true" />}
+          onClick={() => notify('Напоминания включаются в чате с ботом командой /settings.')}
+        >
+          Уведомления
+        </Cell>
+        <Cell
+          before={<IconTile icon={Bug} className="bg-tg-danger" />}
           after={<ChevronRight className="size-5 text-tg-hint" aria-hidden="true" />}
           onClick={() => notify('Опишите проблему в чате с ботом — мы ответим как можно скорее.')}
         >
@@ -93,7 +102,7 @@ export function ProfileScreen({ name, role, onRoleChange, onEditName }: Props) {
 
 function IconTile({ icon: Icon, className }: { icon: LucideIcon; className: string }) {
   return (
-    <span className={`flex size-7 items-center justify-center rounded-lg text-white ${className}`}>
+    <span className={cn('flex size-7 items-center justify-center rounded-lg text-white', className)}>
       <Icon className="size-4" aria-hidden="true" />
     </span>
   )
