@@ -40,3 +40,7 @@ _diag*.py
 webapp/node_modules/
 webapp/.next/
 webapp/out/
+
+# Секреты и локальные настройки фронта: в dev API живёт на localhost:8080.
+# Шаблон — webapp/.env.example (коммитим).
+webapp/.env*.local

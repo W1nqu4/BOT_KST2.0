@@ -25,3 +25,15 @@ PLAN.md
 docker-compose.yml
 Dockerfile
 .dockerignore
+
+# Фронт: node_modules и кэш сборки не тащим в контекст — их создаёт
+# стадия frontend внутри образа. webapp/out тоже исключён: он копируется
+# из стадии сборки (COPY --from=frontend), а не из контекста.
+#
+# НЕ исключаем webapp/app, components, lib, public, package.json,
+# pnpm-lock.yaml, pnpm-workspace.yaml — без них сборка не пройдёт.
+webapp/node_modules
+webapp/.next
+webapp/out
+webapp/.env.local
+webapp/*.log

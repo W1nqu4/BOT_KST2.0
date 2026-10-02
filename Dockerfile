@@ -1,16 +1,43 @@
 # syntax=docker/dockerfile:1
 
-# --- builder: собираем виртуальное окружение отдельным слоем ---
+# --- stage 1: сборка Mini App (Next.js static export) ---
+# Node нужен ТОЛЬКО на этой стадии: в runtime остаётся Python и готовая статика
+# webapp/out. Сам образ node в финальный образ не попадает.
+FROM node:20-slim AS frontend
+
+WORKDIR /build
+
+# pnpm через corepack — версия зафиксирована и совпадает с packageManager
+# в webapp/package.json (pnpm@12.3.4).
+RUN corepack enable && corepack prepare pnpm@12.3.4 --activate
+
+# Сначала манифесты: слой с зависимостями не сбрасывается при правках кода.
+#
+# pnpm-workspace.yaml обязателен: без него corepack-pnpm считает lockfile
+# устаревшим и падает с ERR_PNPM_FROZEN_LOCKFILE_WITH_OUTDATED_LOCKFILE
+# (проверено локально на pnpm@12.3.4). Файл лежит рядом с манифестами и
+# переносится вместе с ними.
+COPY webapp/package.json webapp/pnpm-lock.yaml webapp/pnpm-workspace.yaml ./
+RUN pnpm install --frozen-lockfile
+
+# Потом код фронта целиком (app/, components/, lib/, public/, конфиги).
+COPY webapp/ ./
+
+# Собираем статику: next.config.mjs задаёт output: 'export' и basePath '/app',
+# поэтому результат — файлы, которым Node.js в runtime не нужен.
+RUN pnpm build
+
+# --- stage 2: builder — виртуальное окружение Python отдельным слоем ---
 FROM python:3.11-slim AS builder
 
 WORKDIR /app
 
-COPY requirements.txt .
+COPY requirements.txt ./
 RUN python -m venv /opt/venv && \
     /opt/venv/bin/pip install --no-cache-dir --upgrade pip && \
     /opt/venv/bin/pip install --no-cache-dir -r requirements.txt
 
-# --- runtime: только venv и код, без компиляторов ---
+# --- stage 3: runtime — только venv, код и собранная статика ---
 FROM python:3.11-slim
 
 ENV PYTHONUNBUFFERED=1 \
@@ -24,6 +51,10 @@ COPY --from=builder /opt/venv /opt/venv
 
 COPY bot/ ./bot/
 COPY run.py ./
+
+# Собранный фронт из stage 1. Путь совпадает с WEBAPP_DIR в bot/web.py
+# (корень проекта / webapp / out): по нему create_app монтирует /app/.
+COPY --from=frontend /build/out ./webapp/out
 
 # /app/data — точка монтирования персистентного тома (БД, кэш, бэкапы).
 #
