@@ -52,6 +52,16 @@ COPY --from=builder /opt/venv /opt/venv
 COPY bot/ ./bot/
 COPY run.py ./
 
+# Пакеты, которые нужны runtime-коду, но лежат вне bot/.
+#
+# bot_vk/ — VK-бот (Long Poll): bot/main.py импортирует его в build_vk_bot(),
+# поэтому без этой строки контейнер падал на старте с
+# ModuleNotFoundError: No module named 'bot_vk'.
+# core/ — общие модули для обоих ботов (парсеры, БД, форматирование); пока
+# заготовка, но копируем сразу: иначе тот же баг повторится при переносе кода.
+COPY bot_vk/ ./bot_vk/
+COPY core/ ./core/
+
 # Собранный фронт из stage 1. Путь совпадает с WEBAPP_DIR в bot/web.py
 # (корень проекта / webapp / out): по нему create_app монтирует /app/.
 COPY --from=frontend /build/out ./webapp/out
