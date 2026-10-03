@@ -28,6 +28,9 @@ data/sample_substitutions.html
 # Резервные копии БД (создаются автоматически рядом с bot.db)
 data/backups/
 
+# VK-бот (vkbottle Long Poll): состояние long-poll (ts) пишется в .vkbottle/
+.vkbottle/
+
 # IDE
 .idea/
 .vscode/

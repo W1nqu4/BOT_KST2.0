@@ -4,3 +4,6 @@ beautifulsoup4>=4.12,<5
 lxml>=5.2
 python-dotenv>=1.0,<2
 tzdata>=2024.1 ; sys_platform == "win32"
+
+# VK-бот (Long Poll API) — параллельный бот сообщества ВКонтакте.
+vkbottle>=4.0
