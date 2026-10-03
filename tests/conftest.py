@@ -36,6 +36,26 @@ SAMPLE_DOCX_URL = (
 )
 
 
+@pytest.fixture(autouse=True)
+def disable_vk_bot_by_default(monkeypatch: pytest.MonkeyPatch):
+    """Не пускать тесты в сеть VK.
+
+    ``run_bot`` поднимает VK-бота, если в окружении есть ``VK_TOKEN`` и
+    ``VK_GROUP_ID``. На машине разработчика они лежат в ``.env``, поэтому без
+    этой защиты любой тест, вызывающий ``run_bot``, реально подключался бы к
+    Long Poll VK: тесты становились бы медленными и зависимыми от сети.
+
+    Отдельные тесты, которым нужен настроенный VK-бот, переопределяют значения
+    сами (``monkeypatch.setattr``) — фикстура autouse им не мешает, так как
+    срабатывает раньше и откатывается после каждого теста.
+    """
+    import bot_vk.config as vk_config
+
+    monkeypatch.setattr(vk_config, "VK_TOKEN", "", raising=False)
+    monkeypatch.setattr(vk_config, "VK_GROUP_ID", 0, raising=False)
+    yield monkeypatch
+
+
 @pytest.fixture()
 def sample_schedule_path() -> Path:
     """Путь к образцу расписания; тест скипается, если файла нет."""

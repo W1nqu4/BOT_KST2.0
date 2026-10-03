@@ -354,16 +354,36 @@ async def run_polling_with_restart(dp: Dispatcher, bot: Bot,
         bot: объект Bot.
         shutdown_event: событие остановки.
     """
+    await _run_with_restart(
+        "polling", lambda: dp.start_polling(bot), shutdown_event
+    )
+
+
+async def _run_with_restart(
+    name: str,
+    start: Callable[[], Awaitable[None]],
+    shutdown_event: asyncio.Event,
+) -> None:
+    """Запускать ``start()``, перезапуская его при ошибке, до сигнала остановки.
+
+    Общая часть для Telegram-polling и других долгоживущих циклов. Отмена
+    пролетает наружу: это не сбой, а штатное завершение.
+
+    Args:
+        name: имя цикла для логов.
+        start: корутина запуска (без аргументов).
+        shutdown_event: событие остановки.
+    """
     while not shutdown_event.is_set():
         try:
-            await dp.start_polling(bot)
-            logger.info("polling stopped normally")
+            await start()
+            logger.info("%s stopped normally", name)
             return
         except asyncio.CancelledError:
             raise
         except Exception:
             logger.exception(
-                "polling crashed, restarting",
+                "%s crashed, restarting", name,
                 extra={"delay": POLLING_RESTART_DELAY},
             )
             try:
@@ -374,6 +394,144 @@ async def run_polling_with_restart(dp: Dispatcher, bot: Bot,
                 return
             except asyncio.TimeoutError:
                 continue
+
+
+def build_vk_bot():
+    """Создать VK-бота (vkbottle, Long Poll API).
+
+    Вынесено отдельной функцией, чтобы тесты могли подменить сборку, а
+    приложение — не тянуть vkbottle, когда VK-бот выключен.
+
+    Returns:
+        Экземпляр ``vkbottle.bot.Bot`` с зарегистрированными командами или
+        ``None``, если ``VK_TOKEN``/``VK_GROUP_ID`` не заданы.
+    """
+    from bot_vk import config as vk_config
+
+    if not vk_config.VK_TOKEN or not vk_config.VK_GROUP_ID:
+        return None
+
+    # Импорт внутри функции: Telegram-бот обязан подниматься и без vkbottle,
+    # а VK-бот нужен только когда он настроен.
+    from vkbottle.bot import Bot as VKBot
+    from vkbottle.polling import BotPolling
+
+    from bot_vk.handlers import register_handlers as register_vk_handlers
+
+    vk_bot = VKBot(
+        token=vk_config.VK_TOKEN,
+        # group_id задаём явно: иначе vkbottle выясняет его запросом
+        # groups.getById при старте, а значение VK_GROUP_ID не используется.
+        polling=BotPolling(group_id=vk_config.VK_GROUP_ID),
+    )
+    register_vk_handlers(vk_bot)
+    return vk_bot
+
+
+def start_vk_bot():
+    """Создать VK-бота и запустить его Long Poll отдельной задачей.
+
+    Returns:
+        ``(vk_bot, task)`` или ``None``, если VK-бот не настроен — тогда в лог
+        уходит предупреждение, а Telegram продолжает работать.
+    """
+    vk_bot = build_vk_bot()
+    if vk_bot is None:
+        logger.warning(
+            "VK_TOKEN или VK_GROUP_ID не заданы — VK-бот не запущен"
+        )
+        return None
+
+    task = asyncio.create_task(vk_bot.run_polling(), name="vk_bot")
+    task.add_done_callback(_log_vk_stop)
+    logger.info("VK-бот запущен в основном процессе")
+    return vk_bot, task
+
+
+def _log_vk_stop(task: asyncio.Task) -> None:
+    """Отметить в логе неожиданную остановку VK-бота.
+
+    Long Poll VK переподключается внутри себя, поэтому выход задачи — признак
+    серьёзной ошибки (например, неверного токена). Telegram в этом случае
+    продолжает работать: VK-задача не участвует в ожидании остановки.
+    """
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.error(
+            "VK-бот остановился с ошибкой (Telegram продолжает работать)",
+            extra={"error": repr(exc)},
+        )
+    else:
+        logger.warning(
+            "VK-бот остановился (Telegram продолжает работать)"
+        )
+
+
+async def close_vk_bot(vk_bot) -> None:
+    """Закрыть HTTP-сессию VK-бота, иначе останется «Unclosed client session»."""
+    try:
+        await vk_bot.api.http_client.close()
+    except Exception as exc:
+        logger.warning(
+            "could not close VK bot session", extra={"error": repr(exc)}
+        )
+
+
+async def run_both_bots(telegram_bot, dp: Dispatcher,
+                        shutdown_event: asyncio.Event | None = None) -> None:
+    """Запустить Telegram- и VK-ботов параллельно в одном event loop.
+
+    Возвращает управление, когда пришёл сигнал остановки или завершился
+    polling Telegram. Задача VK-бота НЕ участвует в ожидании остановки:
+    падение VK не роняет Telegram — ошибка попадает в лог (см.
+    :func:`_log_vk_stop`), а Telegram продолжает обслуживать студентов.
+
+    Args:
+        telegram_bot: объект ``aiogram.Bot``.
+        dp: диспетчер aiogram.
+        shutdown_event: событие остановки (в тестах — готовое).
+    """
+    event = shutdown_event or asyncio.Event()
+
+    telegram_task = asyncio.create_task(
+        run_polling_with_restart(dp, telegram_bot, event), name="telegram_bot"
+    )
+
+    vk = start_vk_bot()
+    vk_bot, vk_task = vk if vk is not None else (None, None)
+
+    try:
+        # Ждём либо сигнала остановки, либо завершения polling Telegram.
+        stop_waiter = asyncio.create_task(event.wait(), name="shutdown_wait")
+        done, _pending = await asyncio.wait(
+            {telegram_task, stop_waiter},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if stop_waiter in done:
+            logger.info("shutdown signal received")
+        else:
+            logger.info("polling finished, stopping")
+            stop_waiter.cancel()
+    finally:
+        telegram_task.cancel()
+        if vk_task is not None:
+            vk_task.cancel()
+
+        waiting = [telegram_task] + ([vk_task] if vk_task else [])
+        results = await asyncio.gather(*waiting, return_exceptions=True)
+        for task, result in zip(waiting, results):
+            if isinstance(result, Exception) and not isinstance(
+                result, asyncio.CancelledError
+            ):
+                logger.error(
+                    "bot task stopped with error",
+                    extra={"task": task.get_name(), "error": repr(result)},
+                )
+
+        if vk_bot is not None:
+            await close_vk_bot(vk_bot)
 
 
 async def run_bot(settings: Settings, conn, shutdown_event=None) -> None:
@@ -425,31 +583,17 @@ async def run_bot(settings: Settings, conn, shutdown_event=None) -> None:
     tasks = build_background_tasks(conn, bot, settings)
     logger.info("background tasks started", extra={"count": len(tasks)})
 
-    polling_task = asyncio.create_task(
-        run_polling_with_restart(dp, bot, event), name="polling"
-    )
-
     try:
-        # Ждём либо сигнала остановки, либо завершения polling.
-        stop_waiter = asyncio.create_task(event.wait(), name="shutdown_wait")
-        done, _pending = await asyncio.wait(
-            {polling_task, stop_waiter},
-            return_when=asyncio.FIRST_COMPLETED,
-        )
-        if stop_waiter in done:
-            logger.info("shutdown signal received")
-        else:
-            logger.info("polling finished, stopping")
-            stop_waiter.cancel()
+        # Telegram и VK работают параллельно в одном event loop.
+        # run_both_bots возвращает управление при сигнале остановки или
+        # завершении polling Telegram; VK-задача гасится внутри него.
+        await run_both_bots(bot, dp, event)
     finally:
-        polling_task.cancel()
         for task in tasks:
             task.cancel()
 
-        results = await asyncio.gather(
-            polling_task, *tasks, return_exceptions=True
-        )
-        for task, result in zip([polling_task, *tasks], results):
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        for task, result in zip(tasks, results):
             if isinstance(result, Exception) and not isinstance(
                 result, asyncio.CancelledError
             ):

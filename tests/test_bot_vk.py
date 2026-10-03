@@ -22,7 +22,7 @@ from bot_vk.handlers import register_handlers
 @pytest.fixture()
 def valid_vk_config(monkeypatch: pytest.MonkeyPatch) -> None:
     """Сделать конфигурацию валидной на время теста."""
-    monkeypatch.setattr(vk_config, "VK_TOKEN", "vk1.a.FAKE_TOKEN")
+    monkeypatch.setattr(vk_config, "VK_TOKEN", "FAKE-VK-TOKEN-FOR-TESTS")
     monkeypatch.setattr(vk_config, "VK_GROUP_ID", 123456789)
 
 
@@ -41,7 +41,7 @@ def test_validate_raises_without_token(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_validate_raises_without_group_id(monkeypatch: pytest.MonkeyPatch) -> None:
     """VK_GROUP_ID = 0 → RuntimeError с подсказкой про .env."""
-    monkeypatch.setattr(vk_config, "VK_TOKEN", "vk1.a.FAKE_TOKEN")
+    monkeypatch.setattr(vk_config, "VK_TOKEN", "FAKE-VK-TOKEN-FOR-TESTS")
     monkeypatch.setattr(vk_config, "VK_GROUP_ID", 0)
     with pytest.raises(RuntimeError) as exc:
         validate()
@@ -315,7 +315,7 @@ async def test_main_vk_passes_group_id(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(main_vk, "Bot", RecordingBot)
     monkeypatch.setattr(main_vk, "BotPolling", RecordingPolling)
     monkeypatch.setattr(main_vk.config, "validate", lambda: None)
-    monkeypatch.setattr(main_vk.config, "VK_TOKEN", "vk1.a.FAKE")
+    monkeypatch.setattr(main_vk.config, "VK_TOKEN", "FAKE-VK-TOKEN-FOR-TESTS")
     monkeypatch.setattr(main_vk.config, "VK_GROUP_ID", 987654321)
     registered: list = []
 
@@ -328,7 +328,7 @@ async def test_main_vk_passes_group_id(monkeypatch: pytest.MonkeyPatch) -> None:
 
     await main_vk.main()
 
-    assert created["token"] == "vk1.a.FAKE"
+    assert created["token"] == "FAKE-VK-TOKEN-FOR-TESTS"
     assert polling_kwargs["group_id"] == 987654321
     assert created["polling_started"] is True
     assert len(registered) == 1
