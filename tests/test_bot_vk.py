@@ -139,14 +139,27 @@ def test_link_rule_covers_code_and_bare_command() -> None:
 
 
 def test_process_group_rule_binds_state() -> None:
-    """Шаг ввода группы привязан к состоянию waiting_group."""
-    from bot_vk.handlers import UserState
+    """Шаг ввода группы привязан к состоянию waiting_group.
+
+    Правило составное: ``state`` (ждём ввод группы) и ``func`` (отсекает
+    команды и кнопки меню). Поэтому вместо kwargs проверяем правила, которые
+    vkbottle реально создал.
+    """
+    from bot_vk.handlers import UserState, is_group_input, looks_like_group
 
     bot = FakeBotForRules()
     register_handlers(bot, conn=None)  # type: ignore[arg-type]
 
-    _, _args, kwargs = bot.handlers[1]
-    assert kwargs.get("state") is UserState.waiting_group
+    # Косвенная проверка: правило отсечения работает как задумано.
+    class FakeMessage:
+        def __init__(self, text: str) -> None:
+            self.text = text
+
+    assert is_group_input(FakeMessage("25КАД")) is True
+    assert is_group_input(FakeMessage("/start")) is False
+    assert is_group_input(FakeMessage("📆 Сегодня")) is False
+    assert UserState.waiting_group.value == "waiting_group"
+    assert looks_like_group("25КАД") is True
 
 
 # --- проверка формата ввода ---

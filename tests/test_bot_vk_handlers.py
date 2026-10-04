@@ -605,6 +605,185 @@ async def test_profile_shows_link_status(vk) -> None:
     assert str(tg_id) in joined, answers
 
 
+# --- застрявшее состояние ввода группы (прод-баг «бот молчит на /start») ---
+
+async def test_start_works_with_stuck_state(vk) -> None:
+    """/start при застрявшем waiting_group всё равно отвечает.
+
+    Прод-баг: студент не ввёл группу (состояние waiting_group осталось), и
+    правило ``state=waiting_group`` перехватывало ВСЕ сообщения. Команды и
+    кнопки попадали в шаг ввода группы и молча пропускались — снаружи это
+    выглядело как «бот не отвечает ни на что, кроме /link» (у /link своё
+    правило, срабатывавшее раньше).
+
+    Теперь команды уходят из шага ввода к своим хендлерам.
+    """
+    bot, _api, _conn = vk
+    from bot_vk.handlers import UserState
+
+    storage.save_user_group(_conn, VK_ID, GROUP)
+    await bot.state_dispenser.set(VK_ID, UserState.waiting_group)
+
+    answers = await send(vk, "/start")
+
+    assert answers, "бот обязан ответить даже при застрявшем состоянии"
+    assert any(GROUP in a for a in answers), answers
+    # Состояние снято — пользователь больше не заперт в шаге ввода.
+    assert await bot.state_dispenser.get(VK_ID) is None
+
+
+async def test_menu_button_works_with_stuck_state(vk) -> None:
+    """Нажатие кнопки при застрявшем состоянии обрабатывается, а не глохнет."""
+    bot, _api, conn = vk
+    from bot_vk.handlers import UserState
+
+    storage.save_user_group(conn, VK_ID, GROUP)
+    await bot.state_dispenser.set(VK_ID, UserState.waiting_group)
+
+    answers = await send(vk, "📆 Сегодня")
+
+    assert answers, "кнопка обязана сработать"
+    joined = "\n".join(answers)
+    assert GROUP in joined, answers
+
+
+async def test_phrase_in_state_still_answers(vk) -> None:
+    """Слово вместо группы в шаге ввода даёт подсказку, а не тишину."""
+    bot, _api, _conn = vk
+    from bot_vk.handlers import UserState
+
+    await bot.state_dispenser.set(VK_ID, UserState.waiting_group)
+
+    answers = await send(vk, "не знаю")
+
+    assert answers, "студент не должен остаться без ответа"
+
+
+async def test_all_answers_have_keyboard_where_expected(vk) -> None:
+    """Клавиатура приходит там, где она нужна: у меню, профиля и расписания."""
+    _bot, api, conn = vk
+    storage.save_user_group(conn, VK_ID, GROUP)
+
+    for text in ("/start", "📆 Сегодня", "👤 Профиль", "абракадабра"):
+        api.messages.sent.clear()
+        await send(vk, text)
+        keyboards_sent = [m for m in api.messages.sent if m.get("keyboard")]
+        assert keyboards_sent, f"на {text!r} должна прийти клавиатура"
+
+
+async def test_keyboard_json_is_valid_and_labelled(vk) -> None:
+    """Клавиатура — валидный JSON с ожидаемыми подписями кнопок."""
+    _bot, api, conn = vk
+    storage.save_user_group(conn, VK_ID, GROUP)
+
+    await send(vk, "/start")
+    keyboard = next(m["keyboard"] for m in api.messages.sent
+                    if m.get("keyboard"))
+
+    labels = keyboard_labels(keyboard)
+    assert any("Сегодня" in label for label in labels), labels
+    assert any("Неделя" in label for label in labels), labels
+    assert any("Профиль" in label for label in labels), labels
+
+
+# --- отказ VK из-за клавиатуры: текст должен дойти ---
+
+class KeyboardRejectingMessages:
+    """``api.messages``: сообщения с клавиатурой VK отвергает (код 912).
+
+    Так выглядел прод-баг: VK отклонял клавиатурные сообщения, vkbottle
+    передавал исключение в error_handler и шёл дальше — студент не получал
+    ничего. Здесь проверяем, что текст всё равно доставляется.
+    """
+
+    def __init__(self) -> None:
+        self.accepted: list[str] = []
+        self.rejected = 0
+
+    def get_set_params(self, params: dict) -> dict:
+        return {k: v for k, v in params.items()
+                if v is not None and k not in ("self", "message", "ctx_api")}
+
+    async def send(self, peer_ids=None, **kwargs):
+        if kwargs.get("keyboard"):
+            self.rejected += 1
+            raise KeyboardRejected(912)
+        self.accepted.append(kwargs.get("message") or "")
+        return [1]
+
+
+class KeyboardRejected(Exception):
+    """Ошибка VK: клавиатура/возможности бота не приняты."""
+
+    def __init__(self, code: int) -> None:
+        super().__init__(f"VK error {code}")
+        self.code = code
+
+
+class KeyboardRejectingAPI:
+    def __init__(self) -> None:
+        self.messages = KeyboardRejectingMessages()
+
+    async def request(self, method: str, params: dict):
+        raise AssertionError(f"неожиданный вызов: {method}")
+
+
+@pytest.fixture()
+def rejecting_vk(conn):
+    """Бот, чей VK отвергает клавиатурные сообщения."""
+    from vkbottle.bot import Bot
+
+    api = KeyboardRejectingAPI()
+    bot = Bot(api=api)
+    register_handlers(bot, conn)
+    return bot, api, conn
+
+
+async def test_text_arrives_when_keyboard_rejected(rejecting_vk) -> None:
+    """При отказе клавиатуры текст доходит (раньше была полная тишина)."""
+    bot, api, conn = rejecting_vk
+    storage.save_user_group(conn, VK_ID, GROUP)
+
+    await bot.process_event(make_event("/start"))
+
+    joined = "\n".join(api.messages.accepted)
+    assert api.messages.accepted, "текст обязан дойти, даже если клавиатура не принята"
+    assert GROUP in joined, api.messages.accepted
+    assert api.messages.rejected > 0, "сценарий должен включать отклонённые клавиатуры"
+
+
+async def test_no_duplicate_when_keyboard_rejected(rejecting_vk) -> None:
+    """Повтор без клавиатуры не дублирует сообщение."""
+    bot, api, conn = rejecting_vk
+    storage.save_user_group(conn, VK_ID, GROUP)
+
+    await bot.process_event(make_event("👤 Профиль"))
+
+    assert len(api.messages.accepted) == 1, api.messages.accepted
+    assert "Профиль" in api.messages.accepted[0]
+
+
+async def test_schedule_arrives_when_keyboard_rejected(rejecting_vk) -> None:
+    """Расписание приходит текстом, даже когда кнопки не приняты."""
+    bot, api, conn = rejecting_vk
+    storage.save_user_group(conn, VK_ID, GROUP)
+
+    await bot.process_event(make_event("📆 Сегодня"))
+
+    joined = "\n".join(api.messages.accepted)
+    assert joined, "расписание обязано дойти"
+    assert GROUP in joined, api.messages.accepted
+
+
+async def test_answer_without_keyboard_unaffected(rejecting_vk) -> None:
+    """Сообщения без клавиатуры уходят как обычно."""
+    bot, api, _conn = rejecting_vk
+
+    await bot.process_event(make_event("/link"))
+
+    assert any("Telegram" in m for m in api.messages.accepted), api.messages.accepted
+
+
 # --- изоляция идентификаторов ---
 
 async def test_vk_group_not_written_to_users(vk) -> None:

@@ -34,6 +34,14 @@ CANCEL_WORDS = {"отмена", "cancel", "стоп", "назад", "не над
 # Сколько дней показывать в «неделе» (как в Telegram).
 WEEK_DAYS = 6
 
+# Кнопки меню: по ним состояние ввода группы не должно перехватывать нажатие.
+MENU_TEXTS = {
+    keyboards.BTN_TODAY, "Сегодня", "сегодня",
+    keyboards.BTN_WEEK, "Неделя", "неделя",
+    keyboards.BTN_PROFILE, "Профиль", "профиль",
+    keyboards.BTN_DEADLINES, "Дедлайны", "дедлайны",
+    "/start", "start", "начать", "/link", "/unlink",
+}
 # Формат номера группы (как в bot.handlers.start.GROUP_PATTERN):
 # буквы/цифры/дефис/слэш, 2..12 символов, строго целиком.
 GROUP_PATTERN = re.compile(r"^[А-ЯЁA-Z0-9\-/]{2,12}$")
@@ -65,6 +73,110 @@ def parse_link_code(text: str) -> str | None:
     return match.group(1).upper() if match else None
 
 
+def is_group_input(message) -> bool:
+    """Ввод в состоянии ожидания — обрабатывать ли его как ввод группы.
+
+    Правило для шага ``waiting_group``. Нужно потому, что правило по одному
+    состоянию перехватывает ЛЮБОЙ текст: если пользователь так и не ввёл группу
+    (состояние застряло), под него попадали бы команды и нажатия кнопок меню —
+    снаружи это выглядит как «бот перестал отвечать на /start».
+
+    Пропускаем дальше только то, что заведомо адресовано меню: команды («/...»)
+    и подписи кнопок. Всё остальное (в том числе «не знаю») обрабатывает
+    ``process_group`` и даёт понятную подсказку — студент не остаётся без ответа.
+    """
+    text = (message.text or "").strip()
+    if text.startswith("/"):
+        return False
+    if text in MENU_TEXTS:
+        return False
+    return True
+
+
+def register_error_logging(bot: Bot) -> None:
+    """Логировать ошибки VK API с кодом — иначе сбой выглядит как тишина.
+
+    vkbottle при ошибке внутри хендлера не роняет задачу: он передаёт её в
+    ``error_handler`` и переходит к следующему хендлеру. Если ошибка при
+    отправке (например, VK отверг параметры), пользователь не получает ничего,
+    а в наших логах не остаётся ни строки — именно так выглядит «бот молчит».
+
+    Обработчик ниже печатает код ошибки VK и метод, чтобы причину было видно
+    в логах Railway, а не только в интерфейсе VK.
+    """
+    from vkbottle.exception_factory import VKAPIError
+
+    # У настоящего Bot error_handler есть всегда; заглушки в тестах могут его
+    # не иметь — тогда логирование просто не настраиваем.
+    handler = getattr(bot, "error_handler", None)
+    if handler is None or not hasattr(handler, "register_error_handler"):
+        logger.debug("vk: error_handler недоступен, логирование не настроено")
+        return
+
+    @handler.register_undefined_error_handler
+    async def on_undefined_error(error: Exception, *args, **kwargs) -> None:
+        logger.error(
+            "vk: необработанная ошибка хендлера: %s: %s",
+            type(error).__name__, error,
+            exc_info=not isinstance(error, VKAPIError),
+        )
+
+    @handler.register_error_handler(VKAPIError)
+    async def on_vk_error(error: VKAPIError, *args, **kwargs) -> None:
+        # Код из ответа VK (900-е — ошибки отправки сообщений:
+        # 901 нет прав, 902 приватность, 911 неверная клавиатура и т.д.).
+        logger.error(
+            "vk: ошибка VK API: code=%s msg=%s",
+            getattr(error, "code", "?"), error,
+        )
+
+
+async def send_text(message: Message, text: str, keyboard: str | None = None
+                    ) -> bool:
+    """Отправить сообщение, не теряя текст при отказе клавиатуры.
+
+    VK может отвергнуть сообщение с клавиатурой (912 — «возможности бота
+    выключены в сообществе», 911 — неверный формат). Раньше это давало полную
+    тишину: vkbottle передаёт исключение в ``error_handler`` и идёт к
+    следующему хендлеру, поэтому пользователь не получал ничего.
+
+    При отказе повторяем отправку без клавиатуры: ответ важнее кнопок.
+    Дубля не будет — повтор идёт из того же хендлера, а vkbottle считает
+    хендлер успешным (исключение не всплывает) и останавливает цепочку.
+
+    Args:
+        message: входящее сообщение.
+        text: текст ответа.
+        keyboard: JSON-клавиатура (необязательно).
+
+    Returns:
+        True, если сообщение ушло (с клавиатурой или без неё).
+    """
+    if keyboard is None:
+        await message.answer(text)
+        return True
+
+    try:
+        await message.answer(text, keyboard=keyboard)
+        return True
+    except Exception as exc:  # noqa: BLE001
+        logger.error(
+            "vk: VK отверг сообщение с клавиатурой (код=%s): %s — "
+            "отправляю без клавиатуры",
+            getattr(exc, "code", "?"), exc,
+        )
+
+    try:
+        await message.answer(text)
+        return True
+    except Exception as exc:  # noqa: BLE001
+        logger.error(
+            "vk: сообщение не доставлено даже без клавиатуры (код=%s): %s",
+            getattr(exc, "code", "?"), exc,
+        )
+        return False
+
+
 def looks_like_group(text: str) -> bool:
     """Похож ли ввод на номер группы.
 
@@ -86,6 +198,7 @@ def register_handlers(bot: Bot, conn) -> None:
         bot: экземпляр ``vkbottle.bot.Bot``.
         conn: соединение SQLite (то же, что использует Telegram-бот).
     """
+    register_error_logging(bot)
 
     # --- регистрация группы ---
 
@@ -96,10 +209,9 @@ def register_handlers(bot: Bot, conn) -> None:
 
         if group:
             await bot.state_dispenser.delete(message.peer_id)
-            await message.answer(
-                texts.GREETING_WITH_GROUP.format(
-                    name="друг", group=group
-                ),
+            await send_text(
+                message,
+                texts.GREETING_WITH_GROUP.format(name="друг", group=group),
                 keyboard=keyboards.main_kb(),
             )
             await send_schedule(message, group, date.today())
@@ -111,9 +223,13 @@ def register_handlers(bot: Bot, conn) -> None:
         )
         await message.answer(texts.ASK_GROUP)
 
-    @bot.on.message(state=UserState.waiting_group)
+    @bot.on.message(state=UserState.waiting_group, func=is_group_input)
     async def process_group(message: Message) -> None:
-        """Принять номер группы, проверить и сохранить."""
+        """Принять номер группы, проверить и сохранить.
+
+        Правило ``func=is_group_input`` отсекает команды и нажатия кнопок: они
+        уходят обычным хендлерам, а не застревают здесь (см. :func:`is_group_input`).
+        """
         raw = (message.text or "").strip()
 
         if raw.lower() in CANCEL_WORDS:
@@ -146,7 +262,8 @@ def register_handlers(bot: Bot, conn) -> None:
 
         storage.save_user_group(conn, message.from_id, group)
         await bot.state_dispenser.delete(message.peer_id)
-        await message.answer(
+        await send_text(
+            message,
             texts.GROUP_SAVED.format(group=group),
             keyboard=keyboards.main_kb(),
         )
@@ -194,7 +311,8 @@ def register_handlers(bot: Bot, conn) -> None:
 
         await message.answer(texts.LINK_SUCCESS)
         if tg_group:
-            await message.answer(
+            await send_text(
+                message,
                 texts.LINK_GROUP_FROM_TG.format(group=tg_group),
                 keyboard=keyboards.main_kb(),
             )
@@ -227,7 +345,8 @@ def register_handlers(bot: Bot, conn) -> None:
         tg_id = storage.get_tg_id_by_vk(conn, vk_id)
 
         if not group:
-            await message.answer(
+            await send_text(
+                message,
                 texts.PROFILE_NO_GROUP.format(name="друг"),
                 keyboard=keyboards.main_kb(),
             )
@@ -247,8 +366,8 @@ def register_handlers(bot: Bot, conn) -> None:
             lines.append(texts.LINK_STATUS_NONE)
             lines.append(texts.LINK_HINT_OFFER)
 
-        await message.answer(
-            "\n".join(lines), keyboard=keyboards.main_kb()
+        await send_text(
+            message, "\n".join(lines), keyboard=keyboards.main_kb(),
         )
 
     # --- fallback: обязан быть последним ---
@@ -256,7 +375,8 @@ def register_handlers(bot: Bot, conn) -> None:
     @bot.on.message()
     async def fallback(message: Message) -> None:
         """Подсказка на неизвестную команду."""
-        await message.answer(texts.FALLBACK, keyboard=keyboards.main_kb())
+        await send_text(message, texts.FALLBACK,
+                        keyboard=keyboards.main_kb())
 
     # --- хелперы ---
 
@@ -284,7 +404,8 @@ def register_handlers(bot: Bot, conn) -> None:
             await message.answer(texts.WEEKEND)
 
         lessons = view.lessons_with_substitutions(conn, group, target)
-        await message.answer(
+        await send_text(
+            message,
             view.render_day(group, target, lessons),
             keyboard=keyboards.schedule_kb(),
         )
@@ -292,4 +413,4 @@ def register_handlers(bot: Bot, conn) -> None:
     async def send_week(message: Message, group: str, start: date) -> None:
         """Отправить расписание на WEEK_DAYS дней (режется по лимиту VK)."""
         for chunk in view.render_week(conn, group, start, days=WEEK_DAYS):
-            await message.answer(chunk, keyboard=keyboards.schedule_kb())
+            await send_text(message, chunk, keyboard=keyboards.schedule_kb())
