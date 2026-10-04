@@ -77,9 +77,16 @@ def test_migration_14_in_list() -> None:
 
 
 def test_schema_version_is_14(conn) -> None:
-    """Версия схемы — 14."""
-    assert get_schema_version(conn) == 14
-    assert max(MIGRATIONS) == 14
+    """Версия схемы включает миграцию режима посещаемости (14).
+
+    Номер проверяем не на равенство максимуму: после этой миграции появились
+    и другие (например, 15 — таблица VK-бота), и жёсткая проверка «== 14»
+    ломалась бы при каждом добавлении. Важно, что миграция 14 применена и
+    схема доведена до актуальной версии.
+    """
+    assert get_schema_version(conn) >= 14
+    assert 14 in MIGRATIONS
+    assert get_schema_version(conn) == max(MIGRATIONS)
 
 
 def test_new_columns_exist(conn) -> None:

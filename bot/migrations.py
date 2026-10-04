@@ -344,6 +344,94 @@ def migrate_9_group_chat_pin(conn: sqlite3.Connection) -> None:
     )
 
 
+def migrate_15_vk_users(conn: sqlite3.Connection) -> None:
+    """Миграция 14 → 15: пользователи VK-бота (``vk_users``).
+
+    VK-бот и Telegram-бот — разные мессенджеры с разными пространствами
+    идентификаторов, но оба числа. Писать VK-id в ``users.tg_id`` нельзя:
+    Telegram-рассылки (:func:`bot.db.get_users_by_group` →
+    ``notify_substitutions_loop``) приняли бы VK-пользователя за Telegram-чат
+    и попытались отправить ему сообщение — либо чужому человеку при
+    совпадении id, либо с ошибкой, после которой
+    :func:`bot.db.deactivate_user` пометил бы его неактивным.
+
+    Поэтому у VK-бота своя таблица. Существующие таблицы не меняются:
+    ``users`` продолжает обслуживать только Telegram.
+
+    ``vk_id`` — первичный ключ: у пользователя VK ровно одна группа.
+    ``updated_at`` нужен, чтобы видеть, когда группа задана последний раз
+    (пользователь может сменить её).
+    """
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS vk_users (
+            vk_id      INTEGER PRIMARY KEY,
+            group_name TEXT    NOT NULL,
+            full_name  TEXT    NOT NULL DEFAULT '',
+            created_at TEXT    NOT NULL,
+            updated_at TEXT    NOT NULL
+        )
+        """
+    )
+
+
+def migrate_16_account_links(conn: sqlite3.Connection) -> None:
+    """Миграция 15 → 16: связка аккаунтов Telegram ↔ VK.
+
+    Две таблицы:
+
+    - ``account_links`` — установленные связки ``tg_id ↔ vk_id``. Обе колонки
+      UNIQUE: один аккаунт каждой платформы связан не более чем с одним
+      аккаунтом другой (иначе получились бы цепочки и неоднозначная
+      синхронизация группы).
+    - ``link_codes`` — одноразовые 6-символьные коды. Код живёт 30 минут
+      (``expires_at``) и гасится отметкой ``used_at``; после привязки старые
+      неиспользованные коды пользователя удаляются.
+
+    ВНЕШНИЙ КЛЮЧ НА ``users`` НЕ СТАВИТСЯ намеренно. Строка в ``users``
+    появляется только когда студент выбрал группу для расписания, а связку
+    может захотеть и тот, кто пользуется лишь посещаемостью. С включённым
+    ``PRAGMA foreign_keys=ON`` вставка связки для такого студента падала бы с
+    ``FOREIGN KEY constraint failed`` (проверено). Целостность обеспечивается
+    тем, что ``tg_id`` берётся из проверенного сообщения Telegram, а не из
+    пользовательского ввода.
+    """
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS account_links (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            tg_id      INTEGER UNIQUE,
+            vk_id      INTEGER UNIQUE,
+            linked_at  TEXT    NOT NULL,
+            linked_via TEXT    NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_account_links_tg"
+        " ON account_links(tg_id)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_account_links_vk"
+        " ON account_links(vk_id)"
+    )
+
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS link_codes (
+            code       TEXT PRIMARY KEY,
+            tg_id      INTEGER NOT NULL,
+            created_at TEXT    NOT NULL,
+            expires_at TEXT    NOT NULL,
+            used_at    TEXT
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_link_codes_tg ON link_codes(tg_id)"
+    )
+
+
 MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     1: migrate_1_initial,
     2: migrate_2_add_self_study,
@@ -359,6 +447,8 @@ MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     12: migrate_12_attendance_subject,
     13: migrate_13_attendance_votes,
     14: migrate_14_attendance_mode,
+    15: migrate_15_vk_users,
+    16: migrate_16_account_links,
 }
 
 

@@ -30,6 +30,14 @@ load_dotenv(dotenv_path=ENV_FILE, override=False)
 VK_TOKEN: str = os.environ.get("VK_TOKEN", "").strip()
 VK_GROUP_ID: int = int(os.environ.get("VK_GROUP_ID", "0") or "0")
 
+# Путь к той же БД, что использует Telegram-бот: расписание, замены и группы
+# VK-пользователей лежат в одном файле.
+DB_PATH: str = os.environ.get("DB_PATH", "").strip() or "data/bot.db"
+
+# Лимит длины сообщения VK: длинную неделю режем на части (у Telegram 4096,
+# у VK — 4096, но оставляем запас на служебные символы).
+VK_MESSAGE_LIMIT: int = 3500
+
 
 def validate() -> None:
     """Проверить обязательные переменные VK-бота.

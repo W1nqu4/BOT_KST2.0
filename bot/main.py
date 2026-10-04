@@ -82,6 +82,8 @@ BOT_COMMANDS: tuple[BotCommand, ...] = (
     BotCommand(command="schedule", description="Расписание на сегодня в чат"),
     BotCommand(command="mygroup", description="Моя группа и посещаемость"),
     BotCommand(command="teacher", description="Расписание преподавателя"),
+    BotCommand(command="link", description="Связать аккаунт с VK"),
+    BotCommand(command="unlink", description="Отвязать аккаунт VK"),
 )
 
 
@@ -396,11 +398,15 @@ async def _run_with_restart(
                 continue
 
 
-def build_vk_bot():
+def build_vk_bot(conn=None):
     """Создать VK-бота (vkbottle, Long Poll API).
 
     Вынесено отдельной функцией, чтобы тесты могли подменить сборку, а
     приложение — не тянуть vkbottle, когда VK-бот выключен.
+
+    Args:
+        conn: соединение SQLite, общее с Telegram-ботом (расписание и замены
+            читаются из той же БД; группы VK-пользователей — в ``vk_users``).
 
     Returns:
         Экземпляр ``vkbottle.bot.Bot`` с зарегистрированными командами или
@@ -424,18 +430,21 @@ def build_vk_bot():
         # groups.getById при старте, а значение VK_GROUP_ID не используется.
         polling=BotPolling(group_id=vk_config.VK_GROUP_ID),
     )
-    register_vk_handlers(vk_bot)
+    register_vk_handlers(vk_bot, conn)
     return vk_bot
 
 
-def start_vk_bot():
+def start_vk_bot(conn=None):
     """Создать VK-бота и запустить его Long Poll отдельной задачей.
+
+    Args:
+        conn: соединение SQLite для хендлеров VK.
 
     Returns:
         ``(vk_bot, task)`` или ``None``, если VK-бот не настроен — тогда в лог
         уходит предупреждение, а Telegram продолжает работать.
     """
-    vk_bot = build_vk_bot()
+    vk_bot = build_vk_bot(conn)
     if vk_bot is None:
         logger.warning(
             "VK_TOKEN или VK_GROUP_ID не заданы — VK-бот не запущен"
@@ -479,7 +488,7 @@ async def close_vk_bot(vk_bot) -> None:
         )
 
 
-async def run_both_bots(telegram_bot, dp: Dispatcher,
+async def run_both_bots(telegram_bot, dp: Dispatcher, conn,
                         shutdown_event: asyncio.Event | None = None) -> None:
     """Запустить Telegram- и VK-ботов параллельно в одном event loop.
 
@@ -491,6 +500,8 @@ async def run_both_bots(telegram_bot, dp: Dispatcher,
     Args:
         telegram_bot: объект ``aiogram.Bot``.
         dp: диспетчер aiogram.
+        conn: соединение SQLite — его использует и VK-бот (расписание, замены,
+            группы VK-пользователей в ``vk_users``).
         shutdown_event: событие остановки (в тестах — готовое).
     """
     event = shutdown_event or asyncio.Event()
@@ -499,7 +510,7 @@ async def run_both_bots(telegram_bot, dp: Dispatcher,
         run_polling_with_restart(dp, telegram_bot, event), name="telegram_bot"
     )
 
-    vk = start_vk_bot()
+    vk = start_vk_bot(conn)
     vk_bot, vk_task = vk if vk is not None else (None, None)
 
     try:
@@ -587,7 +598,7 @@ async def run_bot(settings: Settings, conn, shutdown_event=None) -> None:
         # Telegram и VK работают параллельно в одном event loop.
         # run_both_bots возвращает управление при сигнале остановки или
         # завершении polling Telegram; VK-задача гасится внутри него.
-        await run_both_bots(bot, dp, event)
+        await run_both_bots(bot, dp, conn, event)
     finally:
         for task in tasks:
             task.cancel()

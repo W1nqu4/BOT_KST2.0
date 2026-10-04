@@ -83,7 +83,7 @@ def vk_enabled(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr("vkbottle.polling.BotPolling", FakeBotPolling)
     monkeypatch.setattr(
         "bot_vk.handlers.register_handlers",
-        lambda bot: (
+        lambda bot, conn=None: (
             setattr(bot, "handlers_registered", True),
             registered.append(bot),
         ),
@@ -100,12 +100,12 @@ def vk_disabled(monkeypatch: pytest.MonkeyPatch):
 
 def test_build_vk_bot_returns_none_without_credentials(vk_disabled) -> None:
     """Без VK_TOKEN/VK_GROUP_ID бот не создаётся."""
-    assert main_module.build_vk_bot() is None
+    assert main_module.build_vk_bot(None) is None
 
 
 def test_build_vk_bot_configures_token_and_group(vk_enabled) -> None:
     """С настроенными кредами создаётся VKBot с токеном и group_id."""
-    bot = main_module.build_vk_bot()
+    bot = main_module.build_vk_bot(None)
 
     assert isinstance(bot, FakeVKBot)
     assert bot.token == "FAKE-VK-TOKEN-FOR-TESTS"
@@ -163,7 +163,7 @@ async def test_run_both_bots_starts_telegram_and_vk(vk_enabled, caplog) -> None:
     event = asyncio.Event()
     with caplog.at_level(logging.INFO):
         runner = asyncio.create_task(
-            main_module.run_both_bots(object(), dp, event)
+            main_module.run_both_bots(object(), dp, None, event)
         )
         await asyncio.sleep(0.1)
         event.set()
@@ -188,7 +188,7 @@ async def test_run_both_bots_telegram_survives_vk_crash(
         async def run_polling(self) -> None:
             raise FakeVKApiError("VK недоступен: invalid access_token")
 
-    def crashing_build():
+    def crashing_build(conn=None):
         bot = CrashingVKBot(token="x", polling=FakeBotPolling(group_id=1))
         bot.handlers_registered = True
         return bot
@@ -198,7 +198,7 @@ async def test_run_both_bots_telegram_survives_vk_crash(
     event = asyncio.Event()
     with caplog.at_level(logging.INFO):
         runner = asyncio.create_task(
-            main_module.run_both_bots(object(), dp, event)
+            main_module.run_both_bots(object(), dp, None, event)
         )
         await asyncio.sleep(0.1)
 
@@ -218,12 +218,12 @@ async def test_run_both_bots_without_vk_still_runs_telegram(
 ) -> None:
     """Без VK-кредов Telegram работает, в логе — warning."""
     dp = FakeTelegramDispatcher()
-    monkeypatch.setattr(main_module, "build_vk_bot", lambda: None)
+    monkeypatch.setattr(main_module, "build_vk_bot", lambda conn=None: None)
 
     event = asyncio.Event()
     with caplog.at_level(logging.WARNING):
         runner = asyncio.create_task(
-            main_module.run_both_bots(object(), dp, event)
+            main_module.run_both_bots(object(), dp, None, event)
         )
         await asyncio.sleep(0.1)
         event.set()
@@ -242,7 +242,7 @@ async def test_run_both_bots_cancels_vk_and_closes_session(vk_enabled) -> None:
 
     event = asyncio.Event()
     runner = asyncio.create_task(
-        main_module.run_both_bots(object(), dp, event)
+        main_module.run_both_bots(object(), dp, None, event)
     )
     await asyncio.sleep(0.1)
 
@@ -266,7 +266,7 @@ async def test_run_both_bots_closes_vk_session_on_telegram_exit(vk_enabled) -> N
 
     event = asyncio.Event()
     await asyncio.wait_for(
-        main_module.run_both_bots(object(), QuickDispatcher(), event), timeout=5
+        main_module.run_both_bots(object(), QuickDispatcher(), None, event), timeout=5
     )
 
     vk_bot = FakeVKBot.instances[-1]

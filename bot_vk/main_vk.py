@@ -14,7 +14,9 @@ import logging
 from vkbottle.bot import Bot
 from vkbottle.polling import BotPolling
 
-from bot_vk import config
+from bot.db import get_connection
+from bot.migrations import apply_migrations
+from bot_vk import config, storage
 from bot_vk.handlers import register_handlers
 
 logging.basicConfig(
@@ -25,9 +27,19 @@ logger = logging.getLogger("bot_vk")
 
 
 async def main() -> None:
-    """Проверить конфигурацию, зарегистрировать хендлеры и уйти в Long Poll."""
+    """Проверить конфигурацию, подготовить БД и уйти в Long Poll."""
     config.validate()
     logger.info("VK-бот запускается, group_id=%s", config.VK_GROUP_ID)
+
+    # Та же БД, что у Telegram-бота: расписание и замены общие, а группы
+    # VK-пользователей лежат в отдельной таблице vk_users (миграция 15).
+    conn = get_connection(config.DB_PATH)
+    version = apply_migrations(conn)
+    logger.info(
+        "БД готова, схема версии %s, групп в расписании: %s",
+        version,
+        len(storage.available_groups(conn)),
+    )
 
     bot = Bot(
         token=config.VK_TOKEN,
@@ -36,13 +48,17 @@ async def main() -> None:
         # неиспользованным. С конфигом лишнего запроса нет.
         polling=BotPolling(group_id=config.VK_GROUP_ID),
     )
-    register_handlers(bot)
+    register_handlers(bot, conn)
     logger.info(
         "handlers зарегистрированы: %d",
         len(bot.labeler.message_view.handlers),
     )
 
-    await bot.run_polling()
+    try:
+        await bot.run_polling()
+    finally:
+        # Соединение закрываем сами: процедура живёт до остановки процесса.
+        conn.close()
 
 
 if __name__ == "__main__":

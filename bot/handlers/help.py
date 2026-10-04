@@ -150,11 +150,24 @@ async def _profile_text(conn, tg_id: int) -> str:
     group = db.get_user_group(conn, tg_id)
     deadlines = deadline_service.list_active(conn, tg_id)
     notifications = db.get_notifications_enabled(conn, tg_id)
+
+    # Статус связки с VK: студент видит, работает ли он на обеих платформах, и
+    # сразу получает подсказку, что делать дальше.
+    vk_id = db.get_vk_id_by_tg(conn, tg_id)
+    if vk_id:
+        link_line = f"🔗 Связка: ✅ с VK (id {vk_id})"
+        link_hint = "Отвязать: /unlink"
+    else:
+        link_line = "🔗 Связка: ❌ только Telegram"
+        link_hint = "Связать: /link"
+
     return (
         "👤 <b>Профиль</b>\n\n"
         f"🎓 Группа: <b>{escape(group or 'не выбрана')}</b>\n"
         f"📝 Активных дедлайнов: <b>{len(deadlines)}</b>\n"
         f"🔔 Уведомления: <b>{'включены' if notifications else 'выключены'}</b>\n\n"
+        f"{escape(link_line)}\n"
+        f"<i>{escape(link_hint)}</i>\n\n"
         "Подпишись на календарь — расписание появится в телефоне само."
     )
 

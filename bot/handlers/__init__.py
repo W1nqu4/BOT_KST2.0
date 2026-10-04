@@ -12,6 +12,7 @@ from bot.attendance import admin_handlers as attendance_admin_handlers
 from bot.attendance import attendance_handlers as attendance_marks_handlers
 from bot.attendance import handlers as attendance_handlers
 from bot.attendance import vote_handlers as attendance_vote_handlers
+from bot.handlers import account_link as account_link_handlers
 from bot.handlers import admin as admin_handlers
 from bot.handlers import calendar as calendar_handlers
 from bot.handlers import deadlines as deadlines_handlers
@@ -32,6 +33,7 @@ from bot.handlers import teacher as teacher_handlers
 # /schedule, /chat_status) адресованы чату, а не личной переписке.
 ROUTERS: tuple[Router, ...] = (
     start_handlers.router,
+    account_link_handlers.router,
     attendance_handlers.router,
     attendance_marks_handlers.router,
     attendance_vote_handlers.router,

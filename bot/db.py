@@ -12,13 +12,17 @@
 """
 from __future__ import annotations
 
+import logging
 import os
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
+from datetime import datetime, timedelta
 from pathlib import Path
 
-from bot.config import DEFAULT_DB_PATH
+from bot.config import DEFAULT_DB_PATH, TIMEZONE
+
+logger = logging.getLogger(__name__)
 
 
 def _resolve_db_path(db_path: str | Path | None) -> str | Path:
@@ -189,6 +193,22 @@ def update_user_group_only(conn: sqlite3.Connection, tg_id: int,
                 " WHERE tg_id = ?",
                 (full_name, tg_id),
             )
+
+    # Синхронизация со связанным VK-аккаунтом: смена группы в Telegram обязана
+    # быть видна и в VK, иначе у одного студента на платформах окажется разное
+    # расписание. Делается здесь, а не в вызывающем коде: точек записи группы в
+    # ``bot/`` шесть (регистрация, свободный ввод, расписание, вступление в
+    # группу посещаемости), и любая забытая ломала бы связку.
+    #
+    # Рекурсии нет: :func:`upsert_vk_user` пишет в ``vk_users`` напрямую и
+    # обратную синхронизацию не инициирует.
+    linked_vk = get_vk_id_by_tg(conn, tg_id)
+    if linked_vk is not None:
+        upsert_vk_user(conn, linked_vk, group_name=group_name)
+        logger.info(
+            "group synced to linked vk",
+            extra={"tg_id": tg_id, "vk_id": linked_vk, "group": group_name},
+        )
 
 
 def list_available_groups(conn: sqlite3.Connection) -> list[str]:
@@ -900,3 +920,374 @@ def get_all_notify_groups(conn: sqlite3.Connection) -> list[str]:
         ") ORDER BY group_name"
     ).fetchall()
     return [str(row["group_name"]) for row in rows]
+# --- Связка аккаунтов Telegram ↔ VK ---
+#
+# Аккаунты в мессенджерах независимы: у Telegram свой ``tg_id`` в ``users``, у
+# VK свой ``vk_id`` в ``vk_users``. Связка хранится отдельно (``account_links``,
+# миграция 16) и позволяет показывать одну и ту же группу на обеих платформах.
+#
+# Связка только через одноразовый код: @username в TG и VK — разные сущности,
+# совпадение имён ничего не значит.
+
+# Сколько символов в коде связки.
+LINK_CODE_LENGTH = 6
+
+# Сколько минут живёт код.
+LINK_CODE_TTL_MINUTES = 30
+
+# Алфавит кода без неоднозначных символов: нет O/0 и I/1, чтобы код нельзя
+# было переврать при переписывании вручную.
+LINK_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+
+
+def _link_code_now() -> datetime:
+    """Текущий момент в поясе техникума (все отметки времени — в нём)."""
+    return datetime.now(TIMEZONE)
+
+
+def create_link_code(conn: sqlite3.Connection, tg_id: int,
+                     now: datetime | None = None) -> str:
+    """Создать одноразовый код связки для Telegram-пользователя.
+
+    Старые неиспользованные коды этого ``tg_id`` удаляются: у пользователя
+    должен быть ровно один действующий код, иначе после нескольких ``/link``
+    на руках оказывалась бы пачка валидных кодов, и «одноразовость» терялась.
+
+    Args:
+        conn: соединение SQLite.
+        tg_id: Telegram id владельца кода.
+        now: момент создания (для тестов); по умолчанию — текущий.
+
+    Returns:
+        Код из :data:`LINK_CODE_LENGTH` символов (верхний регистр).
+    """
+    import secrets
+
+    created = now or _link_code_now()
+    expires = created + timedelta(minutes=LINK_CODE_TTL_MINUTES)
+
+    with transaction(conn):
+        conn.execute(
+            "DELETE FROM link_codes WHERE tg_id = ? AND used_at IS NULL",
+            (tg_id,),
+        )
+        # Коллизии практически исключены, но PK не даст вставить дубль —
+        # пробуем снова, а не падаем.
+        for _ in range(10):
+            code = "".join(
+                secrets.choice(LINK_CODE_ALPHABET)
+                for _ in range(LINK_CODE_LENGTH)
+            )
+            try:
+                conn.execute(
+                    "INSERT INTO link_codes"
+                    " (code, tg_id, created_at, expires_at, used_at)"
+                    " VALUES (?, ?, ?, ?, NULL)",
+                    (
+                        code,
+                        tg_id,
+                        created.isoformat(timespec="seconds"),
+                        expires.isoformat(timespec="seconds"),
+                    ),
+                )
+                return code
+            except sqlite3.IntegrityError:
+                continue
+
+    raise RuntimeError("не удалось сгенерировать уникальный код связки")
+
+def use_link_code(conn: sqlite3.Connection, code: str, vk_id: int,
+                  now: datetime | None = None) -> dict:
+    """Погасить код связки и связать Telegram-аккаунт с VK.
+
+    Проверки: код существует, не использован, не истёк, и ни одна из сторон
+    ещё не связана с кем-то другим.
+
+    Args:
+        conn: соединение SQLite.
+        code: код, который ввёл пользователь VK.
+        vk_id: id пользователя VK.
+        now: текущий момент (для тестов).
+
+    Returns:
+        Словарь ``{'ok': bool, 'tg_id': int | None, 'error': str | None}``.
+    """
+    moment = now or _link_code_now()
+    cleaned = (code or "").strip().upper()
+
+    if not cleaned:
+        return {"ok": False, "tg_id": None, "error": "Код не указан."}
+
+    row = conn.execute(
+        "SELECT code, tg_id, expires_at, used_at FROM link_codes"
+        " WHERE code = ?",
+        (cleaned,),
+    ).fetchone()
+    if row is None:
+        return {"ok": False, "tg_id": None,
+                "error": "Код не найден. Получи новый в Telegram-боте: /link"}
+
+    tg_id = int(row["tg_id"])
+
+    if row["used_at"]:
+        return {"ok": False, "tg_id": None,
+                "error": "Этот код уже использован. Получи новый: /link"}
+
+    try:
+        expires = datetime.fromisoformat(str(row["expires_at"]))
+    except ValueError:
+        return {"ok": False, "tg_id": None,
+                "error": "Код повреждён. Получи новый: /link"}
+    if moment >= expires:
+        return {"ok": False, "tg_id": None,
+                "error": "Код истёк. Получи новый в Telegram-боте: /link"}
+
+    # Этот VK уже с кем-то связан?
+    linked_tg = get_tg_id_by_vk(conn, vk_id)
+    if linked_tg is not None:
+        if linked_tg == tg_id:
+            return {"ok": True, "tg_id": tg_id, "error": None}
+        return {"ok": False, "tg_id": None,
+                "error": "Этот VK уже связан с другим Telegram-аккаунтом."}
+
+    # Этот TG уже связан с другим VK?
+    linked_vk = get_vk_id_by_tg(conn, tg_id)
+    if linked_vk is not None and linked_vk != vk_id:
+        return {"ok": False, "tg_id": None,
+                "error": "Твой Telegram уже связан с другим VK. "
+                         "Сначала отвяжи: /unlink"}
+
+    with transaction(conn):
+        conn.execute(
+            "UPDATE link_codes SET used_at = ? WHERE code = ?",
+            (moment.isoformat(timespec="seconds"), cleaned),
+        )
+        conn.execute(
+            "INSERT INTO account_links (tg_id, vk_id, linked_at, linked_via)"
+            " VALUES (?, ?, ?, 'from_vk')"
+            " ON CONFLICT(tg_id) DO UPDATE SET"
+            "   vk_id = excluded.vk_id,"
+            "   linked_at = excluded.linked_at,"
+            "   linked_via = excluded.linked_via",
+            (tg_id, vk_id, moment.isoformat(timespec="seconds")),
+        )
+
+    logger.info("accounts linked", extra={"tg_id": tg_id, "vk_id": vk_id})
+    return {"ok": True, "tg_id": tg_id, "error": None}
+
+
+def get_vk_id_by_tg(conn: sqlite3.Connection, tg_id: int) -> int | None:
+    """VK-аккаунт, связанный с этим Telegram-аккаунтом (или None)."""
+    row = conn.execute(
+        "SELECT vk_id FROM account_links WHERE tg_id = ?", (tg_id,)
+    ).fetchone()
+    if row is None or row["vk_id"] is None:
+        return None
+    return int(row["vk_id"])
+
+
+def get_tg_id_by_vk(conn: sqlite3.Connection, vk_id: int) -> int | None:
+    """Telegram-аккаунт, связанный с этим VK-аккаунтом (или None)."""
+    row = conn.execute(
+        "SELECT tg_id FROM account_links WHERE vk_id = ?", (vk_id,)
+    ).fetchone()
+    if row is None or row["tg_id"] is None:
+        return None
+    return int(row["tg_id"])
+
+
+def get_link_info(conn: sqlite3.Connection, *, tg_id: int | None = None,
+                  vk_id: int | None = None) -> dict | None:
+    """Информация о связке аккаунта (для экрана «Профиль»).
+
+    Args:
+        conn: соединение SQLite.
+        tg_id: посмотреть со стороны Telegram.
+        vk_id: посмотреть со стороны VK.
+
+    Returns:
+        ``{'tg_id', 'vk_id', 'linked_at', 'linked_via'}`` или None.
+    """
+    if tg_id is not None:
+        row = conn.execute(
+            "SELECT tg_id, vk_id, linked_at, linked_via FROM account_links"
+            " WHERE tg_id = ?",
+            (tg_id,),
+        ).fetchone()
+    elif vk_id is not None:
+        row = conn.execute(
+            "SELECT tg_id, vk_id, linked_at, linked_via FROM account_links"
+            " WHERE vk_id = ?",
+            (vk_id,),
+        ).fetchone()
+    else:
+        return None
+
+    if row is None:
+        return None
+    return {
+        "tg_id": int(row["tg_id"]) if row["tg_id"] is not None else None,
+        "vk_id": int(row["vk_id"]) if row["vk_id"] is not None else None,
+        "linked_at": str(row["linked_at"] or ""),
+        "linked_via": str(row["linked_via"] or ""),
+    }
+
+
+def unlink_account(conn: sqlite3.Connection, tg_id: int) -> bool:
+    """Удалить связку Telegram-аккаунта с VK.
+
+    Args:
+        conn: соединение SQLite.
+        tg_id: Telegram id.
+
+    Returns:
+        True, если связка была и удалена; False — если связки не было.
+    """
+    with transaction(conn):
+        cursor = conn.execute(
+            "DELETE FROM account_links WHERE tg_id = ?", (tg_id,)
+        )
+    removed = cursor.rowcount > 0
+    if removed:
+        logger.info("accounts unlinked", extra={"tg_id": tg_id})
+    return removed
+
+
+def unlink_account_by_vk(conn: sqlite3.Connection, vk_id: int) -> bool:
+    """Удалить связку со стороны VK (пользователь VK отвязался).
+
+    Args:
+        conn: соединение SQLite.
+        vk_id: id пользователя VK.
+
+    Returns:
+        True, если связка была и удалена.
+    """
+    with transaction(conn):
+        cursor = conn.execute(
+            "DELETE FROM account_links WHERE vk_id = ?", (vk_id,)
+        )
+    removed = cursor.rowcount > 0
+    if removed:
+        logger.info("accounts unlinked by vk", extra={"vk_id": vk_id})
+    return removed
+
+
+# --- Данные VK-аккаунта ---
+
+def get_vk_user(conn: sqlite3.Connection, vk_id: int) -> dict | None:
+    """Данные VK-пользователя или None.
+
+    Returns:
+        ``{'vk_id', 'group_name', 'full_name'}`` или None.
+    """
+    row = conn.execute(
+        "SELECT vk_id, group_name, full_name FROM vk_users WHERE vk_id = ?",
+        (vk_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    return {
+        "vk_id": int(row["vk_id"]),
+        "group_name": str(row["group_name"] or ""),
+        "full_name": str(row["full_name"] or ""),
+    }
+
+
+def upsert_vk_user(conn: sqlite3.Connection, vk_id: int,
+                   group_name: str | None = None,
+                   full_name: str | None = None) -> None:
+    """Создать или обновить VK-пользователя.
+
+    Пустые значения не затирают уже сохранённые: при связке аккаунтов группа
+    может быть неизвестна, и терять прежнюю нельзя.
+
+    Args:
+        conn: соединение SQLite.
+        vk_id: id пользователя VK.
+        group_name: имя группы (None — не менять).
+        full_name: имя из профиля VK (None — не менять).
+    """
+    now = _link_code_now().isoformat(timespec="seconds")
+
+    with transaction(conn):
+        row = conn.execute(
+            "SELECT vk_id FROM vk_users WHERE vk_id = ?", (vk_id,)
+        ).fetchone()
+        if row is None:
+            conn.execute(
+                "INSERT INTO vk_users"
+                " (vk_id, group_name, full_name, created_at, updated_at)"
+                " VALUES (?, ?, ?, ?, ?)",
+                (vk_id, group_name or "", full_name or "", now, now),
+            )
+            return
+
+        if group_name:
+            conn.execute(
+                "UPDATE vk_users SET group_name = ?, updated_at = ?"
+                " WHERE vk_id = ?",
+                (group_name, now, vk_id),
+            )
+        if full_name:
+            conn.execute(
+                "UPDATE vk_users SET full_name = ?, updated_at = ?"
+                " WHERE vk_id = ?",
+                (full_name, now, vk_id),
+            )
+
+
+def update_vk_user_group(conn: sqlite3.Connection, vk_id: int,
+                         group_name: str) -> None:
+    """Записать группу VK-пользователю (создать запись при необходимости)."""
+    upsert_vk_user(conn, vk_id, group_name=group_name)
+
+
+def get_vk_group(conn: sqlite3.Connection, vk_id: int) -> str | None:
+    """Группа VK-пользователя или None."""
+    row = conn.execute(
+        "SELECT group_name FROM vk_users WHERE vk_id = ?", (vk_id,)
+    ).fetchone()
+    if row is None:
+        return None
+    group = str(row["group_name"] or "").strip()
+    return group or None
+
+
+def get_effective_group(conn: sqlite3.Connection, *, tg_id: int | None = None,
+                        vk_id: int | None = None) -> str | None:
+    """Группа аккаунта с учётом связки Telegram ↔ VK.
+
+    У связанной пары группа хранится в двух местах (``users`` и ``vk_users``) и
+    синхронизируется при каждой смене. Если значения всё же разошлись (ручная
+    правка в БД, сбой между двумя записями), приоритет у Telegram: он ведущая
+    платформа. Расхождение попадает в лог как предупреждение.
+
+    Args:
+        conn: соединение SQLite.
+        tg_id: посмотреть со стороны Telegram.
+        vk_id: посмотреть со стороны VK.
+
+    Returns:
+        Имя группы или None, если группа не задана нигде.
+    """
+    if tg_id is None and vk_id is None:
+        return None
+
+    if tg_id is None:
+        tg_id = get_tg_id_by_vk(conn, vk_id)  # type: ignore[arg-type]
+        tg_group = get_user_group(conn, tg_id) if tg_id is not None else None
+        linked_vk = vk_id
+    else:
+        tg_group = get_user_group(conn, tg_id)
+        linked_vk = get_vk_id_by_tg(conn, tg_id)
+
+    vk_group = get_vk_group(conn, linked_vk) if linked_vk is not None else None
+
+    if tg_group and vk_group and tg_group != vk_group:
+        logger.warning(
+            "linked accounts have different groups",
+            extra={"tg_id": tg_id, "vk_id": linked_vk,
+                   "tg_group": tg_group, "vk_group": vk_group},
+        )
+    return tg_group or vk_group
