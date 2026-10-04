@@ -1291,3 +1291,306 @@ def get_effective_group(conn: sqlite3.Connection, *, tg_id: int | None = None,
                    "tg_group": tg_group, "vk_group": vk_group},
         )
     return tg_group or vk_group
+# --- Роль «преподаватель» (миграция 17) ---
+#
+# Регистрация с модерацией: преподаватель выбирает своё ФИО из справочника и
+# создаёт заявку; доступ к группам и расписанию открывается только после
+# одобрения админом. Без модерации любой мог бы назваться чужим ФИО.
+#
+# Роль хранится в отдельной таблице ``teachers`` и не отменяет роль студента:
+# у преподавателя может быть своя группа. Существующие таблицы не меняются.
+
+# Статусы заявки.
+TEACHER_PENDING = "pending"
+TEACHER_APPROVED = "approved"
+TEACHER_REJECTED = "rejected"
+
+TEACHER_STATUSES = (TEACHER_PENDING, TEACHER_APPROVED, TEACHER_REJECTED)
+
+
+def _teacher_now_iso() -> str:
+    """Текущий момент в поясе техникума (как в остальных таблицах)."""
+    return datetime.now(TIMEZONE).isoformat(timespec="seconds")
+
+
+def apply_teacher(conn: sqlite3.Connection, tg_id: int,
+                  full_name: str) -> dict:
+    """Создать заявку на роль преподавателя.
+
+    Повторная заявка не создаётся: если заявка уже есть (в любом статусе),
+    возвращается ошибка с текущим состоянием. Отклонённую заявку админ может
+    одобрить позже, поэтому новый запрос не нужен.
+
+    Args:
+        conn: соединение SQLite.
+        tg_id: Telegram id заявителя.
+        full_name: ФИО из справочника (проверяется вызывающим кодом).
+
+    Returns:
+        Словарь ``{'ok': bool, 'error': str | None, 'status': str | None}``.
+    """
+    name = (full_name or "").strip()
+    if not name:
+        return {"ok": False, "error": "ФИО не указано.", "status": None}
+
+    existing = get_teacher(conn, tg_id)
+    if existing is not None:
+        status = str(existing["status"])
+        if status == TEACHER_PENDING:
+            error = "Заявка уже отправлена и ждёт проверки админом."
+        elif status == TEACHER_APPROVED:
+            error = "Ты уже преподаватель."
+        else:
+            error = "Предыдущая заявка отклонена — напиши админу."
+        return {"ok": False, "error": error, "status": status}
+
+    # ФИО должно быть из справочника: иначе препод «подделается» под любого.
+    from bot.parsers.teachers import TEACHERS, PLACEHOLDER_MARK
+
+    known = any(value == name for value in TEACHERS.values())
+    if not known:
+        return {"ok": False, "error": "ФИО нет в справочнике.",
+                "status": None}
+    if PLACEHOLDER_MARK in name:
+        # «(ФИО уточняется)» — в справочнике ещё нет настоящего имени.
+        return {"ok": False,
+                "error": "Для этой фамилии ФИО ещё не заполнено в справочнике. "
+                         "Напиши админу.",
+                "status": None}
+
+    with transaction(conn):
+        conn.execute(
+            "INSERT INTO teachers"
+            " (tg_id, full_name, status, applied_at, approved_at, approved_by)"
+            " VALUES (?, ?, ?, ?, NULL, NULL)",
+            (tg_id, name, TEACHER_PENDING, _teacher_now_iso()),
+        )
+    logger.info("teacher application created",
+                extra={"tg_id": tg_id, "full_name": name})
+    return {"ok": True, "error": None, "status": TEACHER_PENDING}
+
+
+def get_teacher(conn: sqlite3.Connection, tg_id: int) -> dict | None:
+    """Заявка/роль преподавателя по Telegram id или None.
+
+    Returns:
+        Словарь ``{'tg_id', 'full_name', 'status', 'applied_at',
+        'approved_at', 'approved_by'}`` или None.
+    """
+    row = conn.execute(
+        "SELECT tg_id, full_name, status, applied_at, approved_at, approved_by"
+        " FROM teachers WHERE tg_id = ?",
+        (tg_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    return {
+        "tg_id": int(row["tg_id"]),
+        "full_name": str(row["full_name"] or ""),
+        "status": str(row["status"] or ""),
+        "applied_at": str(row["applied_at"] or ""),
+        "approved_at": (str(row["approved_at"])
+                        if row["approved_at"] is not None else None),
+        "approved_by": (int(row["approved_by"])
+                        if row["approved_by"] is not None else None),
+    }
+
+
+def is_teacher(conn: sqlite3.Connection, tg_id: int) -> bool:
+    """True, если заявка одобрена (только тогда есть доступ).
+
+    До одобрения прав нет: ``pending`` и ``rejected`` дают False.
+    """
+    row = conn.execute(
+        "SELECT status FROM teachers WHERE tg_id = ?", (tg_id,)
+    ).fetchone()
+    return row is not None and str(row["status"]) == TEACHER_APPROVED
+def _set_teacher_status(conn: sqlite3.Connection, tg_id: int,
+                        status: str, admin_id: int | None = None) -> bool:
+    """Сменить статус заявки (внутренняя).
+
+    Returns:
+        True, если запись была и статус изменён.
+    """
+    now = _teacher_now_iso()
+    if status == TEACHER_APPROVED:
+        sql = ("UPDATE teachers SET status = ?, approved_at = ?,"
+               " approved_by = ? WHERE tg_id = ?")
+        params = (status, now, admin_id, tg_id)
+    else:
+        # Отклонение: отметку одобрения снимаем, чтобы не путала.
+        sql = ("UPDATE teachers SET status = ?, approved_at = NULL,"
+               " approved_by = ? WHERE tg_id = ?")
+        params = (status, admin_id, tg_id)
+
+    with transaction(conn):
+        cursor = conn.execute(sql, params)
+    changed = cursor.rowcount > 0
+    if changed:
+        logger.info(
+            "teacher status changed",
+            extra={"tg_id": tg_id, "status": status, "admin_id": admin_id},
+        )
+    return changed
+
+
+def approve_teacher(conn: sqlite3.Connection, tg_id: int,
+                    admin_id: int) -> bool:
+    """Одобрить заявку: преподаватель получает доступ.
+
+    Returns:
+        True, если заявка была и одобрена.
+    """
+    return _set_teacher_status(conn, tg_id, TEACHER_APPROVED, admin_id)
+
+
+def reject_teacher(conn: sqlite3.Connection, tg_id: int,
+                   admin_id: int) -> bool:
+    """Отклонить заявку: доступа не будет.
+
+    Returns:
+        True, если заявка была и отклонена.
+    """
+    return _set_teacher_status(conn, tg_id, TEACHER_REJECTED, admin_id)
+
+
+def cancel_teacher_application(conn: sqlite3.Connection, tg_id: int) -> bool:
+    """Отменить СВОЮ заявку — только пока она не рассмотрена.
+
+    Одобренную роль так снять нельзя: доступ уже выдан, и снимать его должен
+    админ. Поэтому отменяется лишь статус ``pending``.
+
+    Returns:
+        True, если заявка была в статусе ``pending`` и удалена.
+    """
+    with transaction(conn):
+        cursor = conn.execute(
+            "DELETE FROM teachers WHERE tg_id = ? AND status = ?",
+            (tg_id, TEACHER_PENDING),
+        )
+    removed = cursor.rowcount > 0
+    if removed:
+        logger.info("teacher application cancelled", extra={"tg_id": tg_id})
+    return removed
+
+
+def _list_teachers_by_status(conn: sqlite3.Connection,
+                             status: str) -> list[dict]:
+    """Заявки с указанным статусом (по времени подачи)."""
+    rows = conn.execute(
+        "SELECT tg_id, full_name, status, applied_at, approved_at, approved_by"
+        " FROM teachers WHERE status = ? ORDER BY applied_at",
+        (status,),
+    ).fetchall()
+    return [
+        {
+            "tg_id": int(row["tg_id"]),
+            "full_name": str(row["full_name"] or ""),
+            "status": str(row["status"] or ""),
+            "applied_at": str(row["applied_at"] or ""),
+            "approved_at": (str(row["approved_at"])
+                            if row["approved_at"] is not None else None),
+            "approved_by": (int(row["approved_by"])
+                            if row["approved_by"] is not None else None),
+        }
+        for row in rows
+    ]
+
+
+def list_pending_teachers(conn: sqlite3.Connection) -> list[dict]:
+    """Все заявки, ожидающие решения админа."""
+    return _list_teachers_by_status(conn, TEACHER_PENDING)
+
+
+def list_approved_teachers(conn: sqlite3.Connection) -> list[dict]:
+    """Все одобренные преподаватели."""
+    return _list_teachers_by_status(conn, TEACHER_APPROVED)
+
+
+def get_teacher_groups(conn: sqlite3.Connection,
+                       full_name: str) -> list[str]:
+    """Уникальные группы, где преподаватель ведёт занятия.
+
+    Сравнение ФИО — в Python (:func:`_normalize_person`), а не через ``=``:
+    в ячейке ``schedule_cache.teacher`` часто стоит НЕСКОЛЬКО преподавателей
+    через запятую (подгруппы одного занятия), и ``WHERE teacher = ?`` пропустил
+    бы такие пары. Заодно учитывается «ё/е» и регистр.
+
+    Args:
+        conn: соединение SQLite.
+        full_name: полное ФИО из справочника.
+
+    Returns:
+        Отсортированный список групп; пустой, если пар нет.
+    """
+    target = _normalize_person(full_name)
+    if not target:
+        return []
+
+    rows = conn.execute(
+        "SELECT DISTINCT group_name, teacher FROM schedule_cache"
+        " ORDER BY group_name"
+    ).fetchall()
+    found: set[str] = set()
+    for row in rows:
+        if any(_normalize_person(part) == target
+               for part in split_teacher_cell(row["teacher"])):
+            found.add(str(row["group_name"]))
+    return sorted(found)
+
+
+def get_teacher_lessons_for_day(conn: sqlite3.Connection, full_name: str,
+                                d) -> list[dict]:
+    """Пары преподавателя на конкретный день (с учётом чётности недели).
+
+    Чётность берётся из :func:`bot.services.schedule_service.week_type_for_date`
+    и сравнивается с ``week_type`` пары: пары «по чётным» не показываются в
+    нечётную неделю. Импорт внутри функции — чтобы ``bot.db`` не зависел от
+    сервиса расписания на этапе загрузки.
+
+    Args:
+        conn: соединение SQLite.
+        full_name: полное ФИО из справочника.
+        d: дата (``datetime.date``).
+
+    Returns:
+        Список пар ``{group_name, day_of_week, para_number, subject, teacher,
+        room, week_type}``, отсортированный по номеру пары. В каждой записи
+        добавлено ``time_range`` (звонки с учётом субботы).
+    """
+    from bot.services.schedule_service import (
+        time_range_for_date,
+        week_type_for_date,
+    )
+
+    target = _normalize_person(full_name)
+    if not target:
+        return []
+
+    day_of_week = d.isoweekday()
+    target_week = week_type_for_date(d)
+    rows = conn.execute(
+        "SELECT group_name, day_of_week, para_number, subject, teacher,"
+        " room, week_type FROM schedule_cache WHERE day_of_week = ?"
+        " ORDER BY para_number",
+        (day_of_week,),
+    ).fetchall()
+
+    lessons: list[dict] = []
+    for row in rows:
+        if not any(_normalize_person(part) == target
+                   for part in split_teacher_cell(row["teacher"])):
+            continue
+        week_type = str(row["week_type"] or "")
+        # Пустая чётность = пара каждую неделю.
+        if week_type and week_type != target_week:
+            continue
+        lesson = dict(row)
+        lesson["time_range"] = time_range_for_date(
+            int(row["para_number"]), d
+        )
+        lessons.append(lesson)
+
+    lessons.sort(key=lambda item: int(item["para_number"]))
+    return lessons
+    return sorted(found)

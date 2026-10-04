@@ -161,15 +161,33 @@ async def _profile_text(conn, tg_id: int) -> str:
         link_line = "🔗 Связка: ❌ только Telegram"
         link_hint = "Связать: /link"
 
-    return (
-        "👤 <b>Профиль</b>\n\n"
-        f"🎓 Группа: <b>{escape(group or 'не выбрана')}</b>\n"
-        f"📝 Активных дедлайнов: <b>{len(deadlines)}</b>\n"
-        f"🔔 Уведомления: <b>{'включены' if notifications else 'выключены'}</b>\n\n"
-        f"{escape(link_line)}\n"
-        f"<i>{escape(link_hint)}</i>\n\n"
-        "Подпишись на календарь — расписание появится в телефоне само."
-    )
+    # Статус заявки преподавателя: показываем, только если заявка есть —
+    # студентам лишняя строка в профиле ни о чём не говорит.
+    teacher = db.get_teacher(conn, tg_id)
+    teacher_lines: list[str] = []
+    if teacher is not None:
+        from bot.handlers.teacher_apply import status_rus
+
+        teacher_lines = [
+            "",
+            f"👨‍🏫 Заявка преподавателя: {status_rus(str(teacher['status']))}",
+        ]
+        if str(teacher["status"]) == db.TEACHER_PENDING:
+            teacher_lines.append("<i>Отменить: /teacher_cancel</i>")
+
+    return "\n".join([
+        "👤 <b>Профиль</b>",
+        "",
+        f"🎓 Группа: <b>{escape(group or 'не выбрана')}</b>",
+        f"📝 Активных дедлайнов: <b>{len(deadlines)}</b>",
+        f"🔔 Уведомления: <b>{'включены' if notifications else 'выключены'}</b>",
+        *teacher_lines,
+        "",
+        escape(link_line),
+        f"<i>{escape(link_hint)}</i>",
+        "",
+        "Подпишись на календарь — расписание появится в телефоне само.",
+    ])
 
 
 @router.message(F.text == reply_kb.BTN_PROFILE)

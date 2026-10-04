@@ -23,6 +23,7 @@ from bot.handlers import help as help_handlers
 from bot.handlers import schedule as schedule_handlers
 from bot.handlers import start as start_handlers
 from bot.handlers import teacher as teacher_handlers
+from bot.handlers import teacher_apply as teacher_apply_handlers
 
 # Порядок подключения роутеров: сначала регистрация (FSM), затем рабочие
 # разделы, затем обратная связь, админка (свои FSM-состояния) и справка.
@@ -41,6 +42,7 @@ ROUTERS: tuple[Router, ...] = (
     group_chats_handlers.router,
     schedule_handlers.router,
     teacher_handlers.router,
+    teacher_apply_handlers.router,
     deadlines_handlers.router,
     calendar_handlers.router,
     feedback_handlers.router,

@@ -432,6 +432,50 @@ def migrate_16_account_links(conn: sqlite3.Connection) -> None:
     )
 
 
+def migrate_17_teachers(conn: sqlite3.Connection) -> None:
+    """Миграция 16 → 17: роль «преподаватель» с модерацией.
+
+    Преподаватель регистрируется сам, но доступ получает только после
+    одобрения админом: без модерации любой мог бы назваться чужим ФИО и
+    увидеть чужие группы. Заявка хранится со статусом
+    ``pending`` → ``approved`` / ``rejected``.
+
+    ``tg_id`` — первичный ключ: один аккаунт Telegram = одна заявка.
+    ``full_name`` — ФИО из справочника (:data:`bot.parsers.teachers.TEACHERS`),
+    не введённое вручную.
+
+    Индекс по ``schedule_cache(teacher)`` ускоряет выборку пар преподавателя:
+    этот запрос выполняется на каждый его запрос расписания.
+
+    Существующие таблицы (``users``, ``students``, ``vk_users``) не меняются:
+    роль преподавателя живёт отдельно и не отменяет роль студента — у
+    преподавателя может быть своя группа как у студента.
+    """
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS teachers (
+            tg_id       INTEGER PRIMARY KEY,
+            full_name   TEXT    NOT NULL,
+            status      TEXT    NOT NULL DEFAULT 'pending',
+            applied_at  TEXT    NOT NULL,
+            approved_at TEXT,
+            approved_by INTEGER
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_teachers_status ON teachers(status)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_teachers_full_name"
+        " ON teachers(full_name)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_schedule_teacher"
+        " ON schedule_cache(teacher)"
+    )
+
+
 MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     1: migrate_1_initial,
     2: migrate_2_add_self_study,
@@ -449,6 +493,7 @@ MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     14: migrate_14_attendance_mode,
     15: migrate_15_vk_users,
     16: migrate_16_account_links,
+    17: migrate_17_teachers,
 }
 
 
