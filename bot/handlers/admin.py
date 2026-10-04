@@ -39,6 +39,24 @@ router = Router(name="admin")
 # Столько строк группы показываем в /users, дальше — «и ещё N».
 USERS_PAGE_LIMIT = 50
 
+# --- Заявки преподавателей (/teachers) ---
+
+# Сколько ожидающих заявок показывать в тексте и сколько кнопок рисовать.
+PENDING_PAGE_LIMIT = 20
+APPROVED_PAGE_LIMIT = 10
+
+# Кнопок «одобрить» — не больше, чем влезает в экран.
+APPROVE_BUTTONS_LIMIT = 10
+
+# Обрезка ФИО в подписи кнопки (у Telegram лимит на текст кнопки).
+BUTTON_LABEL_LIMIT = 30
+
+# Callback-данные модерации заявок.
+CB_TEACHER_APPROVE_PREFIX = "teacher_appr:"
+CB_TEACHER_YES_PREFIX = "teacher_confirm_yes:"
+CB_TEACHER_NO_PREFIX = "teacher_confirm_no:"
+CB_TEACHER_REFRESH = "teacher_refresh"
+
 
 class IsAdmin(BaseFilter):
     """Пропускает только сообщения от админов из ``settings.admin_ids``."""
@@ -92,6 +110,115 @@ def _format_moment(raw: str | None) -> str:
         return datetime.fromisoformat(raw).strftime("%d.%m %H:%M")
     except ValueError:
         return raw
+
+
+def format_relative_time(iso_ts: str) -> str:
+    """Момент времени в виде «5 минут назад», «2 часа назад», «вчера».
+
+    Нужно в списке заявок: админу важно понять, сколько человек уже ждёт
+    решения, а не абсолютную дату подачи.
+
+    Args:
+        iso_ts: момент в ISO (как в ``teachers.applied_at``).
+
+    Returns:
+        Человекочитаемую строку. Если момент не разбирается — исходное
+        значение (лучше показать как есть, чем упасть).
+    """
+    from datetime import datetime
+
+    try:
+        moment = datetime.fromisoformat(iso_ts)
+    except (ValueError, TypeError):
+        return iso_ts or "—"
+
+    # Наивное время сравниваем с наивным, осведомлённое — с осведомлённым.
+    now = datetime.now(moment.tzinfo) if moment.tzinfo else datetime.now()
+    seconds = int((now - moment).total_seconds())
+
+    if seconds < 0:
+        # Момент в будущем (часы сервера разъехались) — не показываем «-5 мин».
+        return "только что"
+    if seconds < 60:
+        return "только что"
+    if seconds < 3600:
+        return f"{seconds // 60} мин назад"
+    if seconds < 86400:
+        return f"{seconds // 3600} ч назад"
+    if seconds < 86400 * 2:
+        return "вчера"
+    return f"{seconds // 86400} дн назад"
+
+
+def build_teachers_text(conn) -> str:
+    """Текст списка заявок преподавателей для ``/teachers``.
+
+    Показывает ожидающие и одобренные отдельными секциями: админу нужны
+    прежде всего те, что ждут решения.
+
+    Args:
+        conn: соединение SQLite.
+
+    Returns:
+        HTML-текст сообщения.
+    """
+    pending = db.list_pending_teachers(conn)
+    approved = db.list_approved_teachers(conn)
+
+    if not pending and not approved:
+        return (
+            "👨‍🏫 Заявок преподавателей нет.\n\n"
+            "Преподаватель может подать заявку командой /teacher_apply."
+        )
+
+    lines = ["👨‍🏫 <b>Заявки преподавателей</b>", ""]
+
+    if pending:
+        lines.append(f"⏳ <b>Ожидают ({len(pending)}):</b>")
+        for item in pending[:PENDING_PAGE_LIMIT]:
+            lines.append(
+                f"  • {escape(str(item['full_name']))}\n"
+                f"    id <code>{item['tg_id']}</code> · "
+                f"{format_relative_time(str(item['applied_at']))}"
+            )
+        if len(pending) > PENDING_PAGE_LIMIT:
+            lines.append(f"  и ещё {len(pending) - PENDING_PAGE_LIMIT}")
+        lines.append("")
+
+    if approved:
+        lines.append(f"✅ <b>Одобрено ({len(approved)}):</b>")
+        for item in approved[:APPROVED_PAGE_LIMIT]:
+            lines.append(f"  • {escape(str(item['full_name']))}")
+        if len(approved) > APPROVED_PAGE_LIMIT:
+            lines.append(f"  и ещё {len(approved) - APPROVED_PAGE_LIMIT}")
+
+    return "\n".join(lines)
+
+
+def teachers_kb(conn) -> InlineKeyboardMarkup | None:
+    """Кнопки для обработки заявок: по одной на ожидающую.
+
+    Args:
+        conn: соединение SQLite.
+
+    Returns:
+        Клавиатура или None, если ожидающих заявок нет.
+    """
+    pending = db.list_pending_teachers(conn)
+    if not pending:
+        return None
+
+    rows = []
+    for item in pending[:APPROVE_BUTTONS_LIMIT]:
+        name = str(item["full_name"])
+        rows.append([InlineKeyboardButton(
+            text=f"✅ {name[:BUTTON_LABEL_LIMIT]}",
+            callback_data=f"{CB_TEACHER_APPROVE_PREFIX}{item['tg_id']}",
+        )])
+    rows.append([InlineKeyboardButton(
+        text="🔄 Обновить", callback_data=CB_TEACHER_REFRESH,
+    )])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def build_stats_text(conn, db_path: str) -> str:
@@ -171,6 +298,214 @@ async def cmd_stats(message: Message, conn, settings) -> None:
 async def cmd_stats_denied(message: Message) -> None:
     """Посторонним отвечаем нейтрально, не подтверждая существование команды."""
     await message.answer(NOT_FOUND_TEXT)
+
+
+@router.message(Command("teachers"), IsAdmin())
+async def cmd_teachers(message: Message, conn) -> None:
+    """Список заявок преподавателей с кнопками для обработки (только админ)."""
+    await message.answer(
+        build_teachers_text(conn),
+        parse_mode="HTML",
+        reply_markup=teachers_kb(conn),
+    )
+
+
+@router.message(Command("teachers"))
+async def cmd_teachers_denied(message: Message) -> None:
+    """Постороннему не подтверждаем существование команды.
+
+    Telegram не умеет скрывать команды из меню для части пользователей,
+    поэтому единственный способ не светить админку — нейтральный ответ.
+    """
+    await message.answer(NOT_FOUND_TEXT)
+
+
+def teacher_card_kb(tg_id: int) -> InlineKeyboardMarkup:
+    """Кнопки карточки заявки: одобрить, отклонить, назад."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text="✅ Одобрить",
+            callback_data=f"{CB_TEACHER_YES_PREFIX}{tg_id}",
+        )],
+        [InlineKeyboardButton(
+            text="❌ Отклонить",
+            callback_data=f"{CB_TEACHER_NO_PREFIX}{tg_id}",
+        )],
+        [InlineKeyboardButton(
+            text="🔙 Назад",
+            callback_data=CB_TEACHER_REFRESH,
+        )],
+    ])
+
+
+@router.callback_query(F.data.startswith(CB_TEACHER_APPROVE_PREFIX),
+                       IsAdmin())
+async def cb_teacher_approve(callback: CallbackQuery, conn) -> None:
+    """Показать карточку заявки с подтверждением.
+
+    Отдельный шаг нужен, чтобы одобрение не срабатывало от одного случайного
+    касания: доступ к чужим группам выдаётся осознанно.
+    """
+    if callback.data is None or callback.message is None:
+        return
+
+    raw = callback.data[len(CB_TEACHER_APPROVE_PREFIX):]
+    try:
+        tg_id = int(raw)
+    except ValueError:
+        await callback.answer("Некорректная заявка", show_alert=True)
+        return
+
+    teacher = db.get_teacher(conn, tg_id)
+    if teacher is None or teacher["status"] != db.TEACHER_PENDING:
+        await callback.answer("Заявка уже обработана", show_alert=True)
+        return
+
+    full_name = str(teacher["full_name"])
+    await callback.message.answer(
+        "👨‍🏫 <b>Заявка</b>\n\n"
+        f"ФИО: <b>{escape(full_name)}</b>\n"
+        f"От: id <code>{tg_id}</code>\n"
+        f"Подана: {format_relative_time(str(teacher['applied_at']))}\n\n"
+        "Проверь, что человек совпадает с ФИО в справочнике.",
+        parse_mode="HTML",
+        reply_markup=teacher_card_kb(tg_id),
+    )
+    await callback.answer()
+
+
+async def _notify_teacher(bot, tg_id: int, text: str) -> bool:
+    """Сообщить преподавателю о решении (ошибка доставки не критична).
+
+    Человек мог заблокировать бота — тогда решение всё равно остаётся в БД,
+    и преподаватель увидит статус через ``/teacher_status``.
+    """
+    try:
+        await bot.send_message(tg_id, text, parse_mode="HTML")
+        return True
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "could not notify teacher",
+            extra={"tg_id": tg_id, "error": repr(exc)},
+        )
+        return False
+
+
+def _parse_teacher_id(data: str, prefix: str) -> int | None:
+    """Вытащить tg_id из callback-данных (None, если мусор)."""
+    try:
+        return int(data[len(prefix):])
+    except (ValueError, TypeError):
+        return None
+
+
+@router.callback_query(F.data.startswith(CB_TEACHER_YES_PREFIX), IsAdmin())
+async def cb_teacher_confirm_yes(callback: CallbackQuery, conn) -> None:
+    """Одобрить заявку и сообщить преподавателю."""
+    if callback.data is None or callback.message is None:
+        return
+    if callback.from_user is None:
+        return
+
+    tg_id = _parse_teacher_id(callback.data, CB_TEACHER_YES_PREFIX)
+    if tg_id is None:
+        await callback.answer("Некорректная заявка", show_alert=True)
+        return
+
+    # Проверяем статус ДО изменения: approve_teacher идемпотентна (обновит и
+    # уже одобренную), поэтому без этой проверки повторное нажатие выглядело
+    # бы успешным и второй раз слало уведомление преподавателю.
+    current = db.get_teacher(conn, tg_id)
+    if current is None or current["status"] != db.TEACHER_PENDING:
+        await callback.answer("Заявка уже обработана", show_alert=True)
+        return
+
+    if not db.approve_teacher(conn, tg_id, callback.from_user.id):
+        await callback.answer("Заявка уже обработана", show_alert=True)
+        return
+
+    teacher = db.get_teacher(conn, tg_id)
+    full_name = str(teacher["full_name"]) if teacher else "?"
+
+    await _notify_teacher(
+        callback.bot, tg_id,
+        "✅ <b>Твоя заявка одобрена!</b>\n\n"
+        f"ФИО: {escape(full_name)}\n\n"
+        "Команды:\n"
+        "/teacher — моё расписание\n"
+        "/profile — профиль",
+    )
+
+    try:
+        await callback.message.edit_text(
+            f"✅ Заявка <b>{escape(full_name)}</b> одобрена.",
+            parse_mode="HTML",
+        )
+    except Exception:  # noqa: BLE001
+        # Сообщение могли удалить — решению это не мешает.
+        logger.debug("could not edit teacher card", exc_info=True)
+    await callback.answer("Одобрено")
+
+
+@router.callback_query(F.data.startswith(CB_TEACHER_NO_PREFIX), IsAdmin())
+async def cb_teacher_confirm_no(callback: CallbackQuery, conn) -> None:
+    """Отклонить заявку и сообщить преподавателю.
+
+    Заявка не удаляется: остаётся в БД со статусом ``rejected`` — история
+    решений нужна, если человек придёт разбираться.
+    """
+    if callback.data is None or callback.message is None:
+        return
+    if callback.from_user is None:
+        return
+
+    tg_id = _parse_teacher_id(callback.data, CB_TEACHER_NO_PREFIX)
+    if tg_id is None:
+        await callback.answer("Некорректная заявка", show_alert=True)
+        return
+
+    # Статус проверяем до изменения — по той же причине, что и при одобрении.
+    current = db.get_teacher(conn, tg_id)
+    if current is None or current["status"] != db.TEACHER_PENDING:
+        await callback.answer("Заявка уже обработана", show_alert=True)
+        return
+
+    if not db.reject_teacher(conn, tg_id, callback.from_user.id):
+        await callback.answer("Заявка уже обработана", show_alert=True)
+        return
+
+    teacher = db.get_teacher(conn, tg_id)
+    full_name = str(teacher["full_name"]) if teacher else "?"
+
+    await _notify_teacher(
+        callback.bot, tg_id,
+        "❌ <b>Заявка отклонена</b>\n\n"
+        f"ФИО: {escape(full_name)}\n\n"
+        "Если это ошибка — напиши: @W1nqu4",
+    )
+
+    try:
+        await callback.message.edit_text(
+            f"❌ Заявка <b>{escape(full_name)}</b> отклонена.",
+            parse_mode="HTML",
+        )
+    except Exception:  # noqa: BLE001
+        logger.debug("could not edit teacher card", exc_info=True)
+    await callback.answer("Отклонено")
+
+
+@router.callback_query(F.data == CB_TEACHER_REFRESH, IsAdmin())
+async def cb_teacher_refresh(callback: CallbackQuery, conn) -> None:
+    """Обновить список заявок (кнопка из уведомления и карточки)."""
+    if callback.message is None:
+        return
+
+    await callback.message.answer(
+        build_teachers_text(conn),
+        parse_mode="HTML",
+        reply_markup=teachers_kb(conn),
+    )
+    await callback.answer("Обновлено")
 
 
 @router.message(Command("reparse"), IsAdmin())

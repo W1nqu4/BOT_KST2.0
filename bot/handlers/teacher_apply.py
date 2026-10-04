@@ -137,6 +137,20 @@ ASK_QUERY_TEXT = (
 )
 
 
+def application_kb() -> InlineKeyboardMarkup:
+    """Кнопка «Обработать заявки» для уведомления админу.
+
+    Ведёт на общий список заявок (callback ``teacher_refresh``): из уведомления
+    админ попадает прямо к модерации, не вспоминая команду.
+    """
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text="⚙️ Обработать заявки",
+            callback_data="teacher_refresh",
+        )],
+    ])
+
+
 def status_rus(status: str) -> str:
     """Человекочитаемый статус заявки."""
     return {
@@ -365,7 +379,8 @@ async def notify_admin_about_application(bot, conn, tg_id: int,
     delivered = False
     for admin_id in admin_ids:
         try:
-            await bot.send_message(admin_id, text, parse_mode="HTML")
+            await bot.send_message(admin_id, text, parse_mode="HTML",
+                                   reply_markup=application_kb())
             delivered = True
         except Exception as exc:  # noqa: BLE001
             logger.warning(

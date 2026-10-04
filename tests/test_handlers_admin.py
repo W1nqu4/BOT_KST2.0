@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 from aiogram.types import CallbackQuery, Chat, Message, Update, User
 
+from bot import db
 from bot.db import get_connection, transaction
 from bot.handlers import admin as adm
 from bot.keyboards import reply as reply_kb
@@ -485,3 +486,288 @@ async def test_reparse_reports_errors(dp, conn, monkeypatch) -> None:
     assert report.count("ошибка") == 2
     assert "Заняло" in report
     return [m["text"] for m in bot.sent if m["text"]]
+# --- /teachers: модерация заявок преподавателей ---
+
+TEACHER_FIO = "Богатырева Ирина Павловна"
+TEACHER_FIO_2 = "Виссарионова Анна Сергеевна"
+
+
+def _teacher_pending(conn, tg_id: int, full_name: str) -> None:
+    """Создать заявку преподавателя напрямую в БД."""
+    db.apply_teacher(conn, tg_id, full_name)
+
+
+def _messages(bot: FakeBot) -> list[dict]:
+    """Только исходящие СООБЩЕНИЯ (без ответов на callback)."""
+    return [m for m in bot.sent if m["method"] in ("SendMessage", "EditMessageText",
+                                                   "EditMessageReplyMarkup")]
+
+
+def _alerts(bot: FakeBot) -> list[str]:
+    """Тексты ответов на callback (``show_alert`` и подписи кнопок)."""
+    return [m["text"] for m in bot.sent
+            if m["method"] == "AnswerCallbackQuery" and m["text"]]
+
+
+def _last_markup(bot: FakeBot):
+    """Разметка последнего сообщения с клавиатурой."""
+    for message in reversed(_messages(bot)):
+        if message.get("reply_markup"):
+            return message["reply_markup"]
+    return None
+async def test_teachers_without_requests(dp, conn) -> None:
+    """/teachers без заявок сообщает, что их нет."""
+    bot = FakeBot()
+    await dp.feed_update(bot, _update("/teachers", ADMIN_ID))
+
+    text = "\n".join(_texts(bot))
+    assert "Заявок преподавателей нет" in text
+    assert "/teacher_apply" in text
+
+
+async def test_teachers_lists_pending_with_buttons(dp, conn) -> None:
+    """/teachers с двумя заявками: список и по кнопке на каждую."""
+    _teacher_pending(conn, 555001, TEACHER_FIO)
+    _teacher_pending(conn, 555002, TEACHER_FIO_2)
+
+    bot = FakeBot()
+    await dp.feed_update(bot, _update("/teachers", ADMIN_ID))
+
+    text = "\n".join(_texts(bot))
+    assert TEACHER_FIO in text
+    assert TEACHER_FIO_2 in text
+    assert "Ожидают (2)" in text
+
+    markup = _last_markup(bot)
+    assert markup is not None, "должны быть кнопки обработки"
+    approve = [b for row in markup.inline_keyboard for b in row
+               if b.callback_data.startswith(adm.CB_TEACHER_APPROVE_PREFIX)]
+    assert len(approve) == 2, approve
+
+
+async def test_teachers_shows_approved_section(dp, conn) -> None:
+    """Одобренные показываются отдельной секцией."""
+    _teacher_pending(conn, 555001, TEACHER_FIO)
+    _teacher_pending(conn, 555002, TEACHER_FIO_2)
+    db.approve_teacher(conn, 555002, ADMIN_ID)
+
+    bot = FakeBot()
+    await dp.feed_update(bot, _update("/teachers", ADMIN_ID))
+
+    text = "\n".join(_texts(bot))
+    assert "Ожидают (1)" in text
+    assert "Одобрено (1)" in text
+    assert TEACHER_FIO_2 in text
+
+
+async def test_teachers_button_only_for_pending(dp, conn) -> None:
+    """Кнопка «одобрить» есть только у ожидающих заявок."""
+    _teacher_pending(conn, 555001, TEACHER_FIO)
+    _teacher_pending(conn, 555002, TEACHER_FIO_2)
+    db.approve_teacher(conn, 555002, ADMIN_ID)
+
+    bot = FakeBot()
+    await dp.feed_update(bot, _update("/teachers", ADMIN_ID))
+
+    markup = _last_markup(bot)
+    data = [b.callback_data for row in markup.inline_keyboard for b in row
+            if b.callback_data.startswith(adm.CB_TEACHER_APPROVE_PREFIX)]
+    assert data == [f"{adm.CB_TEACHER_APPROVE_PREFIX}555001"], data
+
+
+async def test_teachers_neutral_for_non_admin(dp, conn) -> None:
+    """Не-админ не видит список и не узнаёт о команде."""
+    _teacher_pending(conn, 555001, TEACHER_FIO)
+
+    bot = FakeBot()
+    await dp.feed_update(bot, _update("/teachers", USER_ID))
+
+    text = "\n".join(_texts(bot))
+    assert "Команда не найдена" in text
+    assert TEACHER_FIO not in text, "заявки постороннему не показываем"
+    assert _last_markup(bot) is None, "кнопок постороннему тоже нет"
+async def test_cb_approve_shows_card(dp, conn) -> None:
+    """Кнопка заявки открывает карточку с двумя решениями."""
+    _teacher_pending(conn, 555001, TEACHER_FIO)
+
+    bot = FakeBot()
+    await dp.feed_update(
+        bot, _callback(f"{adm.CB_TEACHER_APPROVE_PREFIX}555001", ADMIN_ID)
+    )
+
+    text = "\n".join(_texts(bot))
+    assert TEACHER_FIO in text
+    assert "555001" in text
+
+    markup = _last_markup(bot)
+    data = [b.callback_data for row in markup.inline_keyboard for b in row]
+    assert f"{adm.CB_TEACHER_YES_PREFIX}555001" in data
+    assert f"{adm.CB_TEACHER_NO_PREFIX}555001" in data
+    assert adm.CB_TEACHER_REFRESH in data
+
+
+async def test_cb_confirm_yes_approves_and_notifies(dp, conn) -> None:
+    """Одобрение меняет статус и уведомляет преподавателя."""
+    _teacher_pending(conn, 555001, TEACHER_FIO)
+
+    bot = FakeBot()
+    await dp.feed_update(
+        bot, _callback(f"{adm.CB_TEACHER_YES_PREFIX}555001", ADMIN_ID)
+    )
+
+    assert db.is_teacher(conn, 555001) is True
+    assert db.get_teacher(conn, 555001)["approved_by"] == ADMIN_ID
+
+    to_teacher = [m for m in _messages(bot) if m["chat_id"] == 555001]
+    assert to_teacher, "преподаватель должен получить уведомление"
+    assert "одобрена" in to_teacher[0]["text"]
+
+    assert "Одобрено" in _alerts(bot)
+
+
+async def test_cb_confirm_no_rejects_and_notifies(dp, conn) -> None:
+    """Отклонение меняет статус и оставляет заявку в истории."""
+    _teacher_pending(conn, 555001, TEACHER_FIO)
+
+    bot = FakeBot()
+    await dp.feed_update(
+        bot, _callback(f"{adm.CB_TEACHER_NO_PREFIX}555001", ADMIN_ID)
+    )
+
+    teacher = db.get_teacher(conn, 555001)
+    assert teacher["status"] == db.TEACHER_REJECTED, "заявка не удалена"
+    assert db.is_teacher(conn, 555001) is False
+
+    to_teacher = [m for m in _messages(bot) if m["chat_id"] == 555001]
+    assert to_teacher, "преподаватель должен получить уведомление"
+    assert "отклонена" in to_teacher[0]["text"]
+
+
+async def test_approve_processed_request_alerts(dp, conn) -> None:
+    """Повторное открытие обработанной заявки: «уже обработана»."""
+    _teacher_pending(conn, 555001, TEACHER_FIO)
+    db.approve_teacher(conn, 555001, ADMIN_ID)
+
+    bot = FakeBot()
+    await dp.feed_update(
+        bot, _callback(f"{adm.CB_TEACHER_APPROVE_PREFIX}555001", ADMIN_ID)
+    )
+
+    assert "обработана" in " ".join(_alerts(bot))
+    assert _last_markup(bot) is None, "карточку повторно не показываем"
+
+
+async def test_double_approve_does_not_pass(dp, conn) -> None:
+    """Повторное одобрение не проходит (статус уже approved)."""
+    _teacher_pending(conn, 555001, TEACHER_FIO)
+    db.approve_teacher(conn, 555001, ADMIN_ID)
+
+    bot = FakeBot()
+    await dp.feed_update(
+        bot, _callback(f"{adm.CB_TEACHER_YES_PREFIX}555001", ADMIN_ID)
+    )
+
+    assert "обработана" in " ".join(_alerts(bot))
+    to_teacher = [m for m in _messages(bot) if m["chat_id"] == 555001]
+    assert not to_teacher, "второе уведомление не отправляем"
+
+
+async def test_cb_refresh_shows_list(dp, conn) -> None:
+    """Кнопка «Обновить» отдаёт актуальный список."""
+    _teacher_pending(conn, 555001, TEACHER_FIO)
+
+    bot = FakeBot()
+    await dp.feed_update(bot, _callback(adm.CB_TEACHER_REFRESH, ADMIN_ID))
+
+    text = "\n".join(_texts(bot))
+    assert "Заявки преподавателей" in text
+    assert TEACHER_FIO in text
+
+
+async def test_callbacks_refused_for_non_admin(dp, conn) -> None:
+    """Не-админ не может одобрить заявку через callback."""
+    _teacher_pending(conn, 555001, TEACHER_FIO)
+
+    bot = FakeBot()
+    await dp.feed_update(
+        bot, _callback(f"{adm.CB_TEACHER_YES_PREFIX}555001", USER_ID)
+    )
+
+    assert db.is_teacher(conn, 555001) is False, "права не выданы"
+# --- format_relative_time ---
+
+def test_relative_time_just_now() -> None:
+    """Меньше минуты — «только что»."""
+    from bot.config import TIMEZONE
+
+    moment = datetime.now(TIMEZONE).isoformat(timespec="seconds")
+    assert adm.format_relative_time(moment) == "только что"
+
+
+def test_relative_time_minutes() -> None:
+    """Минуты назад."""
+    from bot.config import TIMEZONE
+
+    moment = (datetime.now(TIMEZONE) - timedelta(minutes=5)).isoformat()
+    assert adm.format_relative_time(moment) == "5 мин назад"
+
+
+def test_relative_time_hours() -> None:
+    """Часы назад."""
+    from bot.config import TIMEZONE
+
+    moment = (datetime.now(TIMEZONE) - timedelta(hours=3)).isoformat()
+    assert adm.format_relative_time(moment) == "3 ч назад"
+
+
+def test_relative_time_yesterday() -> None:
+    """Вчера."""
+    from bot.config import TIMEZONE
+
+    moment = (datetime.now(TIMEZONE) - timedelta(hours=30)).isoformat()
+    assert adm.format_relative_time(moment) == "вчера"
+
+
+def test_relative_time_days() -> None:
+    """Дни назад."""
+    from bot.config import TIMEZONE
+
+    moment = (datetime.now(TIMEZONE) - timedelta(days=3)).isoformat()
+    assert adm.format_relative_time(moment) == "3 дн назад"
+
+
+def test_relative_time_future_is_safe() -> None:
+    """Момент из будущего не даёт отрицательное «-5 мин»."""
+    from bot.config import TIMEZONE
+
+    moment = (datetime.now(TIMEZONE) + timedelta(minutes=5)).isoformat()
+    assert adm.format_relative_time(moment) == "только что"
+
+
+def test_relative_time_naive_datetime() -> None:
+    """Наивное время (без пояса) тоже обрабатывается."""
+    moment = (datetime.now() - timedelta(minutes=10)).isoformat()
+    assert adm.format_relative_time(moment) == "10 мин назад"
+
+
+def test_relative_time_garbage() -> None:
+    """Мусор возвращается как есть — лучше показать, чем упасть."""
+    assert adm.format_relative_time("не дата") == "не дата"
+    assert adm.format_relative_time("") == "—"
+    assert adm.format_relative_time(None) == "—"
+
+
+def test_relative_time_boundary_hour() -> None:
+    """Ровно на границе часа переключаемся на часы."""
+    from bot.config import TIMEZONE
+
+    moment = (datetime.now(TIMEZONE) - timedelta(seconds=3600)).isoformat()
+    assert adm.format_relative_time(moment) == "1 ч назад"
+
+
+def test_relative_time_boundary_day() -> None:
+    """Ровно на границе суток — «вчера»."""
+    from bot.config import TIMEZONE
+
+    moment = (datetime.now(TIMEZONE) - timedelta(seconds=86400)).isoformat()
+    assert adm.format_relative_time(moment) == "вчера"

@@ -244,7 +244,8 @@ async def test_run_bot_sets_commands(conn, monkeypatch) -> None:
 
     assert [c.command for c in fake_bot.commands] == [
         "start", "help", "settings", "setup", "unsync", "schedule", "mygroup",
-        "teacher", "teacher_apply", "teacher_status", "link", "unlink",
+        "teacher", "teacher_apply", "teacher_status", "teachers", "link",
+        "unlink",
     ]
 
 

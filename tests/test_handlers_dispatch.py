@@ -142,7 +142,8 @@ def test_bot_commands_declared() -> None:
     """set_my_commands получает команды чатов и посещаемости."""
     assert [c.command for c in BOT_COMMANDS] == [
         "start", "help", "settings", "setup", "unsync", "schedule", "mygroup",
-        "teacher", "teacher_apply", "teacher_status", "link", "unlink",
+        "teacher", "teacher_apply", "teacher_status", "teachers", "link",
+        "unlink",
     ]
 
 
