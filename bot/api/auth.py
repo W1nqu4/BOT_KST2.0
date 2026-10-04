@@ -39,8 +39,9 @@ _TOKEN_MISSING = "server_token_missing"
 # Telegram id.
 #
 # Почему это безопасно (и когда перестанет быть):
-#   - в проде PUBLIC_BASE_URL = https://kst24-kst24.up.railway.app, условие
-#     localhost не выполняется → лазейка неактивна, даже если DEV_TG_ID задан;
+#   - в проде PUBLIC_BASE_URL = https://botkst20-production.up.railway.app,
+#     условие localhost не выполняется → лазейка неактивна, даже если
+#     DEV_TG_ID задан;
 #   - переменная НЕ коммитится (.env в .gitignore) и НЕ задаётся в Railway;
 #   - в публичном репозитории её задавать нельзя.
 #
