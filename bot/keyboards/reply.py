@@ -21,6 +21,13 @@ BTN_CANCEL = "↩️ Отмена"
 # Кнопка настройки группы для расписания (показывается inline при первом входе).
 BTN_SETUP_SCHEDULE = "📆 Настроить расписание"
 
+# --- Кнопки преподавателя ---
+# Отдельный набор: у преподавателя другой набор действий — своё расписание,
+# свои группы и посещаемость группы, а не «моя группа» студента.
+BTN_TEACHER_LESSONS = "🎓 Моё расписание"
+BTN_TEACHER_GROUPS = "👥 Мои группы"
+BTN_TEACHER_ATTENDANCE = "📊 Посещаемость"
+
 # Ответ на кнопки, которые подключатся позже.
 IN_DEVELOPMENT = "🚧 Раздел в разработке"
 
@@ -47,4 +54,30 @@ def main_kb() -> ReplyKeyboardMarkup:
         ],
         resize_keyboard=True,
         input_field_placeholder="Выбери раздел или напиши группу",
+    )
+
+
+def teacher_main_kb() -> ReplyKeyboardMarkup:
+    """Меню преподавателя: своё расписание, группы и посещаемость.
+
+    Layout:
+        [🎓 Моё расписание] [👥 Мои группы]
+        [📊 Посещаемость]   [👤 Профиль]
+
+    Отличается от :func:`main_kb` другим набором действий: преподавателю нужны
+    свои занятия и группы, где он ведёт, а не «📊 Моя группа» студента.
+    Кнопка «👤 Профиль» общая — она есть в обоих меню.
+
+    Returns:
+        ReplyKeyboardMarkup с четырьмя кнопками.
+    """
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text=BTN_TEACHER_LESSONS),
+             KeyboardButton(text=BTN_TEACHER_GROUPS)],
+            [KeyboardButton(text=BTN_TEACHER_ATTENDANCE),
+             KeyboardButton(text=BTN_PROFILE)],
+        ],
+        resize_keyboard=True,
+        input_field_placeholder="Выбери раздел",
     )

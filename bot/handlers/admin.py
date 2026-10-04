@@ -432,8 +432,9 @@ async def cb_teacher_confirm_yes(callback: CallbackQuery, conn) -> None:
         "✅ <b>Твоя заявка одобрена!</b>\n\n"
         f"ФИО: {escape(full_name)}\n\n"
         "Команды:\n"
-        "/teacher — моё расписание\n"
-        "/profile — профиль",
+        "/my_lessons — моё расписание\n"
+        "/my_groups — мои группы\n"
+        "/attendance <группа> — посещаемость",
     )
 
     try:

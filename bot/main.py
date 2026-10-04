@@ -84,6 +84,8 @@ BOT_COMMANDS: tuple[BotCommand, ...] = (
     BotCommand(command="teacher", description="Расписание преподавателя"),
     BotCommand(command="teacher_apply", description="Заявка на роль преподавателя"),
     BotCommand(command="teacher_status", description="Статус заявки преподавателя"),
+    BotCommand(command="my_lessons", description="Моё расписание (преподаватель)"),
+    BotCommand(command="my_groups", description="Мои группы (преподаватель)"),
     BotCommand(command="teachers", description="Заявки преподавателей (админ)"),
     BotCommand(command="link", description="Связать аккаунт с VK"),
     BotCommand(command="unlink", description="Отвязать аккаунт VK"),

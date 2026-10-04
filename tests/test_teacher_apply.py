@@ -8,6 +8,7 @@ from datetime import date
 
 import pytest
 
+from bot import db
 from bot.db import (
     TEACHER_APPROVED,
     TEACHER_PENDING,
@@ -312,6 +313,64 @@ def test_cancel_approved_is_refused(conn) -> None:
 def test_cancel_without_application(conn) -> None:
     """Отмена без заявки — False."""
     assert cancel_teacher_application(conn, TG_ID) is False
+
+
+# --- «вакансия» — не преподаватель ---
+
+def test_is_vacancy_helper() -> None:
+    """Метка «вакансия» распознаётся (в любом регистре и с пробелами)."""
+    assert db.is_vacancy("вакансия") is True
+    assert db.is_vacancy("Вакансия") is True
+    assert db.is_vacancy("  ВАКАНСИЯ  ") is True
+    assert db.is_vacancy("Богатырева Ирина Павловна") is False
+    assert db.is_vacancy("") is False
+
+
+def test_vacancy_not_in_reference() -> None:
+    """В справочнике нет «вакансии» — подделаться под неё нельзя."""
+    assert not any(db.is_vacancy(value) for value in TEACHERS.values())
+    assert not any(db.is_vacancy(name) for name in available_names())
+    assert match_names("ваканс") == []
+
+
+def test_apply_teacher_rejects_vacancy(conn) -> None:
+    """Заявку от имени «вакансии» подать нельзя."""
+    result = apply_teacher(conn, TG_ID, "вакансия")
+
+    assert result["ok"] is False
+    assert get_teacher(conn, TG_ID) is None
+
+
+def test_vacancy_has_no_groups(conn) -> None:
+    """«вакансия» не считается преподавателем с группами.
+
+    В реальном расписании «вакансия» стоит у полусотни пар, и без этой
+    проверки она получила бы доступ к десяткам групп сразу.
+    """
+    conn.execute(
+        "INSERT INTO schedule_cache (group_name, day_of_week, para_number,"
+        " subject, teacher, room, week_type, updated_at)"
+        " VALUES ('25КАД', 1, 1, 'Математика', 'вакансия', '204', '', 'x')")
+    conn.commit()
+
+    assert get_teacher_groups(conn, "вакансия") == []
+    assert get_teacher_lessons_for_day(conn, "вакансия",
+                                       date(2026, 10, 5)) == []
+
+
+def test_vacancy_mixed_cell_ignored(conn) -> None:
+    """В ячейке «ФИО, вакансия» учитывается только человек."""
+    conn.execute(
+        "INSERT INTO schedule_cache (group_name, day_of_week, para_number,"
+        " subject, teacher, room, week_type, updated_at)"
+        " VALUES ('24МОСДР1', 1, 1, 'Геодезия', ?, '411Б', '', 'x')",
+        (f"{FIO}, вакансия",))
+    conn.commit()
+
+    # Группа из составной ячейки попадает к человеку…
+    assert "24МОСДР1" in get_teacher_groups(conn, FIO)
+    # …а «вакансия» из той же ячейки преподавателем не становится.
+    assert get_teacher_groups(conn, "вакансия") == []
 
 
 # --- группы и пары ---

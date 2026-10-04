@@ -257,6 +257,17 @@ def _normalize_person(text: str) -> str:
     return str(text or "").strip().lower().replace("ё", "е")
 
 
+# Метка парсера «место не занято» (см. bot/parsers/schedule.py: VACANCY_RE).
+# Это не человек, поэтому в роли преподавателя она не участвует: иначе
+# «вакансия» получила бы доступ к десяткам групп сразу.
+VACANCY_MARK = "вакансия"
+
+
+def is_vacancy(name: str) -> bool:
+    """Является ли значение меткой «вакансия», а не ФИО человека."""
+    return _normalize_person(name) == VACANCY_MARK
+
+
 def _all_teacher_names(conn: sqlite3.Connection) -> list[str]:
     """Все преподаватели: справочник плюс встречающиеся в расписании.
 
@@ -276,7 +287,7 @@ def _all_teacher_names(conn: sqlite3.Connection) -> list[str]:
     for row in rows:
         names.update(split_teacher_cell(row["teacher"]))
 
-    return sorted(name for name in names if _normalize_person(name) != "вакансия")
+    return sorted(name for name in names if not is_vacancy(name))
 
 
 def find_teachers(conn: sqlite3.Connection, query: str) -> list[str]:
@@ -1347,6 +1358,13 @@ def apply_teacher(conn: sqlite3.Connection, tg_id: int,
     # ФИО должно быть из справочника: иначе препод «подделается» под любого.
     from bot.parsers.teachers import TEACHERS, PLACEHOLDER_MARK
 
+    if is_vacancy(name):
+        # «вакансия» — служебная метка, а не человек: за ней стоят десятки
+        # групп, и доступ к ним не должен достаться никому.
+        return {"ok": False,
+                "error": "Это не ФИО преподавателя.",
+                "status": None}
+
     known = any(value == name for value in TEACHERS.values())
     if not known:
         return {"ok": False, "error": "ФИО нет в справочнике.",
@@ -1524,7 +1542,9 @@ def get_teacher_groups(conn: sqlite3.Connection,
         Отсортированный список групп; пустой, если пар нет.
     """
     target = _normalize_person(full_name)
-    if not target:
+    if not target or is_vacancy(full_name):
+        # «вакансия» — не человек: пар у неё нет (иначе она «вела» бы
+        # полсотни групп сразу).
         return []
 
     rows = conn.execute(
@@ -1564,7 +1584,7 @@ def get_teacher_lessons_for_day(conn: sqlite3.Connection, full_name: str,
     )
 
     target = _normalize_person(full_name)
-    if not target:
+    if not target or is_vacancy(full_name):
         return []
 
     day_of_week = d.isoweekday()

@@ -142,19 +142,20 @@ def test_bot_commands_declared() -> None:
     """set_my_commands получает команды чатов и посещаемости."""
     assert [c.command for c in BOT_COMMANDS] == [
         "start", "help", "settings", "setup", "unsync", "schedule", "mygroup",
-        "teacher", "teacher_apply", "teacher_status", "teachers", "link",
-        "unlink",
+        "teacher", "teacher_apply", "teacher_status", "my_lessons", "my_groups",
+        "teachers", "link", "unlink",
     ]
 
 
 def test_dispatcher_includes_conn(dp, conn) -> None:
     """Диспетчер отдаёт хендлерам соединение БД."""
     assert dp.workflow_data["conn"] is conn
-    # 16 роутеров: добавились attendance (регистрация), attendance_marks
-    # (отметки), attendance_vote (голосование), attendance_admin, teacher,
+    # 17 роутеров: добавились teacher_ui (UI преподавателя — раньше студенческих
+    # из-за /attendance), attendance (регистрация), attendance_marks (отметки),
+    # attendance_vote (голосование), attendance_admin, teacher,
     # teacher_apply (/teacher_apply), account_link (/link) и group_input
     # (свободный ввод группы — подключается последним).
-    assert len(all_routers()) == 16
+    assert len(all_routers()) == 17
 
 
 async def test_start_shows_greeting_without_asking_group(

@@ -63,14 +63,14 @@ def available_names() -> list[str]:
 
     Записи с пометкой :data:`bot.parsers.teachers.PLACEHOLDER_MARK` не
     предлагаются: там настоящего имени ещё нет («Аверина (ФИО уточняется)»),
-    и одобрить такую заявку админ не сможет — непонятно, кто это.
+    и одобрить такую заявку админ не смог бы — непонятно, кто это.
 
     Returns:
         Отсортированный список полных ФИО.
     """
     return sorted(
         value for value in TEACHERS.values()
-        if PLACEHOLDER_MARK not in value
+        if PLACEHOLDER_MARK not in value and not db.is_vacancy(value)
     )
 
 

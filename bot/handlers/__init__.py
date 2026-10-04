@@ -24,6 +24,7 @@ from bot.handlers import schedule as schedule_handlers
 from bot.handlers import start as start_handlers
 from bot.handlers import teacher as teacher_handlers
 from bot.handlers import teacher_apply as teacher_apply_handlers
+from bot.handlers import teacher_ui as teacher_ui_handlers
 
 # Порядок подключения роутеров: сначала регистрация (FSM), затем рабочие
 # разделы, затем обратная связь, админка (свои FSM-состояния) и справка.
@@ -34,6 +35,10 @@ from bot.handlers import teacher_apply as teacher_apply_handlers
 # /schedule, /chat_status) адресованы чату, а не личной переписке.
 ROUTERS: tuple[Router, ...] = (
     start_handlers.router,
+    # UI преподавателя — ДО студенческих роутеров: у `/attendance` есть фильтр
+    # IsTeacher, и студент должен пройти мимо к своему хендлеру в
+    # attendance_handlers. При обратном порядке команда досталась бы студенту.
+    teacher_ui_handlers.router,
     account_link_handlers.router,
     attendance_handlers.router,
     attendance_marks_handlers.router,
