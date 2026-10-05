@@ -203,3 +203,133 @@ async def test_calendar_no_rrule(client, conn) -> None:
 
     response = await client.get(f"/calendar/{token}.ics")
     assert "RRULE" not in await response.text()
+# --- /app/: раздача Mini App и кеширование ---
+#
+# Сборка фронта (`webapp/out`) в git не коммитится (см. `.gitignore`), поэтому
+# тесты не полагаются на неё: поддельная сборка создаётся в tmp_path, а
+# ``WEBAPP_DIR`` подменяется на время теста. Так проверяется и раздача, и
+# заголовки — независимо от того, собран ли фронт на машине разработчика.
+
+@pytest.fixture()
+def miniapp(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Поддельная сборка Mini App: index.html + один хешированный чанк."""
+    out = tmp_path / "out"
+    (out / "_next" / "static" / "chunks").mkdir(parents=True)
+    (out / "index.html").write_text(
+        "<!DOCTYPE html><title>КСТ — студенческий бот</title>"
+        "<script src=\"/app/_next/static/chunks/abc123.js\"></script>",
+        encoding="utf-8",
+    )
+    (out / "_next" / "static" / "chunks" / "abc123.js").write_text(
+        "console.log('kst')", encoding="utf-8",
+    )
+
+    import bot.web as web_module
+
+    monkeypatch.setattr(web_module, "WEBAPP_DIR", out)
+    return out
+
+
+@pytest.fixture()
+async def miniapp_client(conn, miniapp):
+    """Клиент с поддельной сборкой фронта."""
+    server = TestServer(create_app(conn))
+    test_client = TestClient(server)
+    await test_client.start_server()
+    yield test_client
+    await test_client.close()
+
+
+async def test_app_slash_serves_index(miniapp_client) -> None:
+    """GET /app/ → 200 и та же оболочка, что и index.html."""
+    response = await miniapp_client.get("/app/")
+
+    assert response.status == 200
+    assert "text/html" in response.headers["Content-Type"]
+    body = await response.text()
+    assert "КСТ — студенческий бот" in body
+
+
+async def test_app_without_slash_serves_index(miniapp_client) -> None:
+    """GET /app (без слэша) → 200: маршрут зарегистрирован до add_static."""
+    response = await miniapp_client.get("/app")
+
+    assert response.status == 200
+    assert "КСТ — студенческий бот" in await response.text()
+
+
+async def test_app_index_not_cached(miniapp_client) -> None:
+    """Оболочка SPA отдаётся с ``no-cache``.
+
+    Иначе после пересборки фронта закешированный ``index.html`` запрашивает
+    чанки со старыми хешами, получает 404 и приложение не открывается при
+    живом сервере.
+    """
+    response = await miniapp_client.get("/app/")
+
+    assert response.status == 200
+    assert response.headers["Cache-Control"] == "no-cache, must-revalidate"
+
+
+async def test_app_asset_is_immutable(miniapp_client) -> None:
+    """Хешированный чанк кешируется «навсегда».
+
+    Имя файла меняется вместе с содержимым, поэтому повторный запрос не нужен —
+    на этом и держится безопасность ``no-cache`` для оболочки.
+    """
+    response = await miniapp_client.get("/app/_next/static/chunks/abc123.js")
+
+    assert response.status == 200
+    assert response.headers["Cache-Control"] == (
+        "public, max-age=31536000, immutable"
+    )
+
+
+async def test_health_has_no_cache_header(client) -> None:
+    """/health не затронут фиксом: заголовок кеширования ему не навязывается."""
+    response = await client.get("/health")
+
+    assert response.status == 200
+    assert "Cache-Control" not in response.headers
+    assert (await response.json())["status"] == "ok"
+
+
+async def test_calendar_cache_policy_untouched(client, conn) -> None:
+    """Политика /calendar не перебита middleware.
+
+    У подписки своя политика (``no-cache, must-revalidate``), заданная
+    хендлером: middleware не должен её перезаписывать.
+    """
+    token = ics_service.get_or_create_token(conn, 1)
+
+    response = await client.get(f"/calendar/{token}.ics")
+
+    assert response.status == 200
+    assert response.headers["Cache-Control"] == "no-cache, must-revalidate"
+
+
+async def test_api_has_no_cache_header(client) -> None:
+    """У ``/api/...`` заголовок не появляется: правило только про ``/app/``."""
+    response = await client.get("/api/health")
+
+    assert response.status == 200
+    assert "Cache-Control" not in response.headers
+
+
+async def test_app_without_build_is_404(conn, tmp_path, monkeypatch) -> None:
+    """Фронт не собран: ``/app/`` отдаёт 404, а не падает.
+
+    Так выглядит локальный запуск без ``pnpm build`` — бот обязан работать.
+    """
+    import bot.web as web_module
+
+    monkeypatch.setattr(web_module, "WEBAPP_DIR", tmp_path / "missing")
+
+    server = TestServer(create_app(conn))
+    test_client = TestClient(server)
+    await test_client.start_server()
+    try:
+        assert (await test_client.get("/app/")).status == 404
+        assert (await test_client.get("/app")).status == 404
+    finally:
+        await test_client.close()

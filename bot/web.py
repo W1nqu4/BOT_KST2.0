@@ -32,12 +32,15 @@ logger = logging.getLogger(__name__)
 # Соединение и настройки: определены в bot.api.keys (чтобы пакет API не
 # импортировал bot.web и не было цикла). Реэкспорт — тесты берут их отсюда.
 __all__ = [
+    "ASSETS_IMMUTABLE",
     "CONN_KEY",
     "SETTINGS_KEY",
+    "SPA_NO_CACHE",
     "WEBAPP_DIR",
     "create_app",
     "handle_calendar",
     "handle_health",
+    "webapp_cache_middleware",
 ]
 
 # Имя файла в Content-Disposition: клиенты используют его при скачивании.
@@ -49,6 +52,22 @@ WEBAPP_DIR = Path(__file__).resolve().parent.parent / "webapp" / "out"
 
 # Префикс раздачи Mini App: совпадает с basePath в webapp/next.config.mjs.
 WEBAPP_PREFIX = "/app/"
+
+# Префикс статики сборки: Next.js кладёт сюда весь вывод билда, а имена файлов
+# содержат контент-хеш (chunk name меняется при каждой пересборке).
+WEBAPP_ASSETS_PREFIX = "/app/_next/"
+
+# Кеширование ответов Mini App.
+#
+# Почему две разные политики: ``index.html`` ссылается на чанки, чьи имена
+# содержат хеш. После пересборки фронта хеши меняются, и закешированный
+# ``index.html`` начинает запрашивать файлы, которых на сервере уже нет —
+# браузер получает 404 на JS и показывает «This page couldn't load», хотя
+# сервер жив (/health отвечает 200). Поэтому оболочку перепроверяем каждый раз,
+# а хешированную статику можно кешировать «навсегда»: её имя меняется вместе
+# с содержимым.
+SPA_NO_CACHE = "no-cache, must-revalidate"
+ASSETS_IMMUTABLE = "public, max-age=31536000, immutable"
 
 
 def _json_response(payload: dict, status: int = 200) -> web.Response:
@@ -194,6 +213,45 @@ async def cors_middleware(request: web.Request,
     return response
 
 
+@web.middleware
+async def webapp_cache_middleware(request: web.Request,
+                                  handler) -> web.StreamResponse:
+    """Проставить ``Cache-Control`` ответам Mini App.
+
+    Зачем middleware, а не параметр ``add_static``: в aiohttp 3.14
+    ``add_static`` не принимает заголовки, а ``FileResponse`` в fallback
+    пришлось бы оборачивать вручную. Одна точка на весь ``/app/`` проще и
+    покрывает сразу оба случая — оболочку SPA и хешированную статику.
+
+    Правила:
+
+    - ``/app/_next/...`` (js, css, шрифты — имена с контент-хешем) →
+      ``public, max-age=31536000, immutable``: файл с таким именем никогда не
+      меняется, поэтому повторный запрос к серверу не нужен;
+    - остальное под ``/app/`` (``index.html`` и клиентские пути SPA) →
+      ``no-cache, must-revalidate``: оболочку перепроверяем, иначе после
+      пересборки фронта она запросит уже несуществующие чанки;
+    - всё прочее (``/health``, ``/api/...``, ``/calendar/...``) не трогаем.
+
+    Заголовок ставится, только если обработчик его не задал: политику
+    отдельного эндпоинта middleware перебивать не должен.
+    """
+    response = await handler(request)
+
+    path = request.path
+    if path.startswith(WEBAPP_ASSETS_PREFIX):
+        cache_control = ASSETS_IMMUTABLE
+    elif path.startswith(WEBAPP_PREFIX) or path == WEBAPP_PREFIX.rstrip("/"):
+        cache_control = SPA_NO_CACHE
+    else:
+        return response
+
+    # 304/4xx/5xx кешировать незачем: заголовок на них смысла не несёт.
+    if response.status == 200 and "Cache-Control" not in response.headers:
+        response.headers["Cache-Control"] = cache_control
+    return response
+
+
 def create_app(conn, settings=None) -> web.Application:
     """Собрать aiohttp-приложение.
 
@@ -206,7 +264,9 @@ def create_app(conn, settings=None) -> web.Application:
         ``/api/...`` и статика Mini App по ``/app/`` (если ``webapp/out``
         собран — иначе маршруты не регистрируются и ``/app/`` отдаёт 404).
     """
-    app = web.Application(middlewares=(cors_middleware,))
+    app = web.Application(
+        middlewares=(webapp_cache_middleware, cors_middleware)
+    )
     app[CONN_KEY] = conn
     app[SETTINGS_KEY] = settings
 
