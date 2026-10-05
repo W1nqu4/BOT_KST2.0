@@ -27,6 +27,7 @@ import sqlite3
 from datetime import datetime
 
 from bot.config import TIMEZONE
+from bot.db import TEACHER_APPROVED
 from bot.parsers.groups import normalize_group_name
 
 logger = logging.getLogger(__name__)
@@ -274,3 +275,58 @@ def get_profile_group(conn: sqlite3.Connection, vk_id: int) -> str | None:
     from bot.db import get_effective_group
 
     return get_effective_group(conn, vk_id=vk_id)
+
+
+# --- роль преподавателя ---
+#
+# Заявки живут в таблице ``teachers`` по ``tg_id`` (Telegram). У VK-пользователя
+# своего tg_id нет, поэтому сначала берём связанный Telegram: без связки подать
+# заявку нельзя — иначе препод в TG не получил бы доступ по ней. Функции ниже
+# оборачивают :mod:`bot.db`, чтобы у VK-кода была одна точка доступа к данным.
+
+def get_linked_tg_id(conn: sqlite3.Connection, vk_id: int) -> int | None:
+    """Telegram-аккаунт, связанный с VK (синоним :func:`get_tg_id_by_vk`).
+
+    Отдельное имя — потому что в контексте преподавателя читается понятнее:
+    заявка подаётся «за связанный Telegram», а не «по vk_id».
+    """
+    return get_tg_id_by_vk(conn, vk_id)
+
+
+def get_teacher(conn: sqlite3.Connection, tg_id: int) -> dict | None:
+    """Заявка/роль преподавателя по Telegram id (или None)."""
+    from bot.db import get_teacher as _get
+
+    return _get(conn, tg_id)
+
+
+def teacher_full_name(conn: sqlite3.Connection, vk_id: int) -> str | None:
+    """ФИО преподавателя для этого VK-пользователя (или None).
+
+    None означает «не преподаватель»: нет связки с TG, нет заявки либо заявка
+    ещё не одобрена. Одобрение проверяется здесь же — по ней VK-бот решает,
+    показывать ли меню преподавателя.
+    """
+    tg_id = get_linked_tg_id(conn, vk_id)
+    if tg_id is None:
+        return None
+
+    teacher = get_teacher(conn, tg_id)
+    if not teacher or str(teacher.get("status")) != TEACHER_APPROVED:
+        return None
+    return str(teacher.get("full_name") or "") or None
+
+
+def apply_teacher(conn: sqlite3.Connection, tg_id: int,
+                  full_name: str) -> dict:
+    """Создать заявку на роль преподавателя (см. :func:`bot.db.apply_teacher`)."""
+    from bot.db import apply_teacher as _apply
+
+    return _apply(conn, tg_id, full_name)
+
+
+def cancel_teacher_application(conn: sqlite3.Connection, tg_id: int) -> bool:
+    """Отменить свою заявку, пока она не рассмотрена."""
+    from bot.db import cancel_teacher_application as _cancel
+
+    return _cancel(conn, tg_id)

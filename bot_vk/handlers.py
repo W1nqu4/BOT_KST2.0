@@ -21,10 +21,13 @@ import logging
 import re
 from datetime import date, timedelta
 
-from vkbottle import BaseStateGroup
-from vkbottle.bot import Bot, Message
+from vkbottle import BaseStateGroup, GroupEventType
+from vkbottle.bot import Bot, Message, MessageEvent
 
-from bot_vk import keyboards, storage, texts, view
+from bot import db
+from bot.services import teacher_names
+from bot.services.teacher_notify import notify_admin_about_teacher_application
+from bot_vk import keyboards, storage, texts, tg_bridge, view
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +44,10 @@ MENU_TEXTS = {
     keyboards.BTN_PROFILE, "Профиль", "профиль",
     keyboards.BTN_DEADLINES, "Дедлайны", "дедлайны",
     "/start", "start", "начать", "/link", "/unlink",
+    # Команды преподавателя: под состояние ввода группы/фамилии они попадать
+    # не должны — иначе «/teacher_cancel» ушёл бы в поиск по справочнику.
+    "/teacher_apply", "teacher_apply", "/teacher_status", "teacher_status",
+    "/teacher_cancel", "teacher_cancel",
 }
 # Формат номера группы (как в bot.handlers.start.GROUP_PATTERN):
 # буквы/цифры/дефис/слэш, 2..12 символов, строго целиком.
@@ -56,6 +63,12 @@ class UserState(BaseStateGroup):
     """Состояния диалога VK-бота."""
 
     waiting_group = "waiting_group"
+
+
+class TeacherApplyState(BaseStateGroup):
+    """Состояния заявки на роль преподавателя."""
+
+    waiting_name = "teacher_apply_waiting_name"
 
 
 def parse_link_code(text: str) -> str | None:
@@ -316,6 +329,184 @@ def register_handlers(bot: Bot, conn) -> None:
                 texts.LINK_GROUP_FROM_TG.format(group=tg_group),
                 keyboard=keyboards.main_kb(),
             )
+
+    # --- заявка преподавателя ---
+
+    @bot.on.message(text=["/teacher_apply", "teacher_apply"])
+    async def teacher_apply_handler(message: Message) -> None:
+        """Начать заявку на роль преподавателя (или показать текущий статус).
+
+        Заявка подаётся ЗА связанный Telegram-аккаунт: таблица ``teachers``
+        привязана к ``tg_id``, и одобрение в TG должно открывать доступ именно
+        тому аккаунту. Без связки честно просим её оформить.
+        """
+        vk_id = message.from_id
+        tg_id = storage.get_linked_tg_id(conn, vk_id)
+        if tg_id is None:
+            await message.answer(texts.TEACHER_NEED_LINK)
+            return
+
+        existing = storage.get_teacher(conn, tg_id)
+        if existing:
+            status = str(existing["status"])
+            full_name = str(existing["full_name"] or "?")
+            if status == db.TEACHER_PENDING:
+                await message.answer(
+                    texts.TEACHER_ALREADY_PENDING.format(fio=full_name)
+                )
+            elif status == db.TEACHER_APPROVED:
+                await message.answer(
+                    texts.TEACHER_ALREADY_APPROVED.format(fio=full_name)
+                )
+            else:
+                await message.answer(texts.TEACHER_REJECTED)
+            return
+
+        # Заявки нет — просим фамилию и переходим в состояние ожидания.
+        await bot.state_dispenser.set(
+            message.peer_id, TeacherApplyState.waiting_name
+        )
+        await message.answer(texts.TEACHER_ASK_NAME)
+
+    @bot.on.message(state=TeacherApplyState.waiting_name,
+                    func=is_group_input)
+    async def process_teacher_name(message: Message) -> None:
+        """Найти ФИО по введённой фамилии и показать совпадения кнопками.
+
+        Правило ``func=is_group_input`` (то же, что у ввода группы) отсекает
+        команды и нажатия кнопок меню: под состояние попадал бы ЛЮБОЙ текст, и
+        «/teacher_cancel» ушёл бы в поиск по справочнику.
+        """
+        raw = (message.text or "").strip()
+
+        if raw.lower() in CANCEL_WORDS:
+            await bot.state_dispenser.delete(message.peer_id)
+            await message.answer(texts.TEACHER_APPLY_CANCELLED)
+            return
+
+        # Пустой текст (стикер, фото без подписи): просим фамилию заново.
+        # Команды сюда не доходят — их отсекает func=is_group_input.
+        if not raw:
+            await message.answer(texts.TEACHER_ASK_SURNAME_AGAIN)
+            return
+
+        matches = teacher_names.match_names(raw)
+        if not matches:
+            await message.answer(
+                texts.TEACHER_NOT_FOUND.format(query=raw)
+            )
+            return
+
+        # Список кладём в payload состояния: в callback уходит индекс, а не
+        # ФИО — короткий payload надёжнее длинной строки.
+        # Список уже обрезан до MAX_CHOICES внутри match_names: показывать
+        # «слишком много совпадений» не нужно, дальше уточнять нечем.
+        await bot.state_dispenser.set(
+            message.peer_id, TeacherApplyState.waiting_name,
+            teacher_matches=matches,
+        )
+        await send_text(
+            message, texts.TEACHER_CHOOSE_FIO,
+            keyboard=keyboards.names_kb(matches),
+        )
+
+    @bot.on.raw_event(GroupEventType.MESSAGE_EVENT, dataclass=MessageEvent,
+                      payload_contains={keyboards.TEACHER_CB_FIELD:
+                                        keyboards.TEACHER_CB_VALUE})
+    async def teacher_pick_name(event: MessageEvent) -> None:
+        """Нажатие кнопки с ФИО: создать заявку с выбранным ФИО.
+
+        Индекс сверяется со списком из состояния: кнопка могла устареть
+        (перезапуск бота, новая подборка) — тогда честно просим заново.
+        """
+        vk_id = event.user_id
+        peer = await bot.state_dispenser.get(event.peer_id)
+        matches = (peer.payload.get("teacher_matches") if peer else None) or []
+
+        raw_index = (event.payload or {}).get(keyboards.TEACHER_CB_INDEX)
+        try:
+            index = int(raw_index)
+        except (TypeError, ValueError):
+            index = -1
+
+        if index < 0 or index >= len(matches):
+            await event.show_snackbar(texts.TEACHER_STALE_CHOICE)
+            return
+
+        tg_id = storage.get_linked_tg_id(conn, vk_id)
+        if tg_id is None:
+            # Связку сняли между шагами — то же объяснение, что и в начале.
+            await event.show_snackbar(texts.TEACHER_NEED_LINK)
+            return
+
+        full_name = str(matches[index])
+        result = storage.apply_teacher(conn, tg_id, full_name)
+        await bot.state_dispenser.delete(event.peer_id)
+
+        if not result["ok"]:
+            await event.send_message(
+                texts.TEACHER_APPLY_FAILED.format(error=result["error"])
+            )
+        else:
+            await event.send_message(
+                texts.TEACHER_APPLIED.format(fio=full_name)
+            )
+            # Уведомляем админа в TELEGRAM (админ живёт там). Ссылку на
+            # aiogram-бота даёт tg_bridge — aiogram в bot_vk не импортируется.
+            await notify_admin_about_teacher_application(
+                tg_bridge.get_tg_bot(), conn, tg_id, full_name, "vk",
+            )
+
+    @bot.on.raw_event(GroupEventType.MESSAGE_EVENT, dataclass=MessageEvent,
+                      payload_contains={
+                          keyboards.TEACHER_CB_FIELD:
+                              keyboards.TEACHER_CB_CANCEL_VALUE})
+    async def teacher_cancel_pick(event: MessageEvent) -> None:
+        """«🔙 Отмена» на шаге выбора ФИО."""
+        await bot.state_dispenser.delete(event.peer_id)
+        await event.send_message(texts.TEACHER_APPLY_CANCELLED)
+
+    @bot.on.message(text=["/teacher_status", "teacher_status"])
+    async def teacher_status_handler(message: Message) -> None:
+        """Показать статус своей заявки."""
+        tg_id = storage.get_linked_tg_id(conn, message.from_id)
+        teacher = storage.get_teacher(conn, tg_id) if tg_id else None
+        if teacher is None:
+            await message.answer(texts.TEACHER_STATUS_NONE)
+            return
+
+        await message.answer(texts.TEACHER_STATUS.format(
+            fio=str(teacher["full_name"] or "?"),
+            status=teacher_names.status_rus(str(teacher["status"])),
+            applied_at=str(teacher["applied_at"] or "")[:16],
+        ))
+
+    @bot.on.message(text=["/teacher_cancel", "teacher_cancel"])
+    async def teacher_cancel_handler(message: Message) -> None:
+        """Отменить свою заявку, только пока она не рассмотрена.
+
+        Заодно снимаем состояние: команда может прийти в середине шага ввода
+        фамилии, и «зависшее» состояние потом перехватывало бы обычный текст.
+        """
+        await bot.state_dispenser.delete(message.peer_id)
+
+        tg_id = storage.get_linked_tg_id(conn, message.from_id)
+        if tg_id is None:
+            await message.answer(texts.TEACHER_CANCEL_NONE)
+            return
+
+        if storage.cancel_teacher_application(conn, tg_id):
+            await message.answer(texts.TEACHER_CANCELLED)
+            return
+
+        # Либо заявки нет, либо она уже рассмотрена.
+        teacher = storage.get_teacher(conn, tg_id)
+        if teacher is None:
+            await message.answer(texts.TEACHER_CANCEL_NONE)
+        else:
+            await message.answer(texts.TEACHER_CANCEL_FORBIDDEN.format(
+                status=teacher_names.status_rus(str(teacher["status"])),
+            ))
 
     # --- расписание ---
 

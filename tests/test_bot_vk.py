@@ -87,7 +87,12 @@ class FakeBotForRules:
 
 
 def test_register_handlers_registers_commands() -> None:
-    """register_handlers создаёт все команды VK-бота в нужном порядке."""
+    """register_handlers создаёт все команды VK-бота в нужном порядке.
+
+    Порядок важен: конкретные команды объявлены раньше fallback, иначе он
+    перехватил бы их. Команды преподавателя стоят перед расписанием — так их
+    видно в списке рядом с остальными разделами, а не за студенческими.
+    """
     bot = FakeBotForRules()
     register_handlers(bot, conn=None)  # type: ignore[arg-type]
 
@@ -96,11 +101,55 @@ def test_register_handlers_registers_commands() -> None:
         "start_handler",
         "process_group",
         "link_handler",
+        "teacher_apply_handler",
+        "process_teacher_name",
+        "teacher_status_handler",
+        "teacher_cancel_handler",
         "today_handler",
         "week_handler",
         "profile_handler",
         "fallback",
     ]
+
+
+def test_teacher_commands_before_fallback() -> None:
+    """Команды преподавателя объявлены раньше fallback.
+
+    Иначе «/teacher_status» и «/teacher_cancel» попадали бы в перехватчик и
+    отвечали подсказкой вместо статуса заявки.
+    """
+    bot = FakeBotForRules()
+    register_handlers(bot, conn=None)  # type: ignore[arg-type]
+
+    names = [func.__name__ for func, _, _ in bot.handlers]
+    for handler in ("teacher_apply_handler", "process_teacher_name",
+                    "teacher_status_handler", "teacher_cancel_handler"):
+        assert names.index(handler) < names.index("fallback"), handler
+
+
+def test_teacher_apply_state_value() -> None:
+    """Состояние заявки имеет ожидаемое имя (на него завязаны тесты и логи)."""
+    from bot_vk.handlers import TeacherApplyState
+
+    assert TeacherApplyState.waiting_name.value == "teacher_apply_waiting_name"
+
+
+def test_teacher_name_state_skips_commands() -> None:
+    """Под состояние ввода фамилии не попадают команды и кнопки меню.
+
+    Правило переиспользует :func:`is_group_input`: без него «/teacher_cancel»
+    ушёл бы в поиск по справочнику вместо отмены.
+    """
+    from bot_vk.handlers import is_group_input
+
+    class FakeMessage:
+        def __init__(self, text: str) -> None:
+            self.text = text
+
+    assert is_group_input(FakeMessage("Богатырева")) is True
+    assert is_group_input(FakeMessage("/teacher_cancel")) is False
+    assert is_group_input(FakeMessage("/teacher_status")) is False
+    assert is_group_input(FakeMessage("📆 Сегодня")) is False
 
 
 def test_fallback_is_registered_last() -> None:

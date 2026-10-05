@@ -439,11 +439,15 @@ def build_vk_bot(conn=None):
     return vk_bot
 
 
-def start_vk_bot(conn=None):
+def start_vk_bot(conn=None, tg_bot=None):
     """Создать VK-бота и запустить его Long Poll отдельной задачей.
 
     Args:
         conn: соединение SQLite для хендлеров VK.
+        tg_bot: объект ``aiogram.Bot``, работающий в этом же процессе. Через
+            :mod:`bot_vk.tg_bridge` VK-заявка преподавателя уведомляет админов
+            в Telegram. Ссылку передаём здесь, а не в :func:`build_vk_bot`:
+            сборку VK-бота подменяют тесты, и лишний параметр сломал бы их.
 
     Returns:
         ``(vk_bot, task)`` или ``None``, если VK-бот не настроен — тогда в лог
@@ -455,6 +459,12 @@ def start_vk_bot(conn=None):
             "VK_TOKEN или VK_GROUP_ID не заданы — VK-бот не запущен"
         )
         return None
+
+    # Ссылка на Telegram-бота для уведомлений из VK. Импорт внутри функции:
+    # без настроенного VK-бота модуль bridge не нужен.
+    from bot_vk import tg_bridge
+
+    tg_bridge.set_tg_bot(tg_bot)
 
     task = asyncio.create_task(vk_bot.run_polling(), name="vk_bot")
     task.add_done_callback(_log_vk_stop)
@@ -494,7 +504,7 @@ async def close_vk_bot(vk_bot) -> None:
 
 
 async def run_both_bots(telegram_bot, dp: Dispatcher, conn,
-                        shutdown_event: asyncio.Event | None = None) -> None:
+                  shutdown_event: asyncio.Event | None = None) -> None:
     """Запустить Telegram- и VK-ботов параллельно в одном event loop.
 
     Возвращает управление, когда пришёл сигнал остановки или завершился
@@ -503,7 +513,9 @@ async def run_both_bots(telegram_bot, dp: Dispatcher, conn,
     :func:`_log_vk_stop`), а Telegram продолжает обслуживать студентов.
 
     Args:
-        telegram_bot: объект ``aiogram.Bot``.
+        telegram_bot: объект ``aiogram.Bot``. Он же передаётся VK-боту
+            ссылкой (:mod:`bot_vk.tg_bridge`): заявка преподавателя из VK
+            уведомляет админов в Telegram.
         dp: диспетчер aiogram.
         conn: соединение SQLite — его использует и VK-бот (расписание, замены,
             группы VK-пользователей в ``vk_users``).
@@ -515,7 +527,7 @@ async def run_both_bots(telegram_bot, dp: Dispatcher, conn,
         run_polling_with_restart(dp, telegram_bot, event), name="telegram_bot"
     )
 
-    vk = start_vk_bot(conn)
+    vk = start_vk_bot(conn, telegram_bot)
     vk_bot, vk_task = vk if vk is not None else (None, None)
 
     try:
