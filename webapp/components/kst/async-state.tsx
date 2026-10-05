@@ -48,10 +48,17 @@ export function ErrorState({
 }) {
   return (
     <div className="flex flex-col gap-3 px-4 pt-6">
+      {/*
+        `action` у Placeholder НЕ передаём: его тип — ReactNode (React-элемент),
+        а не объект с полями. Объект вида {children, onClick} React пытается
+        отрисовать как дочерний узел и падает с «Objects are not valid as a
+        React child» (minified React error #31) — именно так ломался экран при
+        401 без initData. Кнопка повтора ниже и есть это действие: дублировать
+        её внутри Placeholder незачем.
+      */}
       <Placeholder
         header="Не удалось загрузить"
         description={message}
-        action={onRetry ? { children: 'Обновить', onClick: onRetry } : undefined}
       />
       {onRetry && (
         <Button
