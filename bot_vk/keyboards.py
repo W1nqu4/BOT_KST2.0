@@ -11,10 +11,13 @@ from __future__ import annotations
 from vkbottle import Callback, Keyboard, KeyboardButtonColor, Text
 
 # Подписи кнопок. Иконка входит в текст: VK присылает нажатие именно как
-# текст кнопки, поэтому «📆 Сегодня» и «Сегодня» — разные строки.
-BTN_TODAY = "📆 Сегодня"
-BTN_WEEK = "📅 Неделя"
+# текст кнопки, поэтому «📆 Расписание» и «Расписание» — разные строки.
+#
+# Набор и порядок совпадают с Telegram (bot/keyboards/reply.py: BTN_SCHEDULE,
+# BTN_DEADLINES, BTN_MY_GROUP, BTN_PROFILE) — раскладка должна быть 1-в-1.
+BTN_SCHEDULE = "📆 Расписание"
 BTN_DEADLINES = "📝 Дедлайны"
+BTN_MY_GROUP = "📊 Моя группа"
 BTN_PROFILE = "👤 Профиль"
 
 # Кнопка отмены при выборе ФИО преподавателя (inline).
@@ -32,34 +35,38 @@ TEACHER_CB_CANCEL_VALUE = "tapply_cancel"
 
 
 def main_kb() -> str:
-    """Главное меню VK-бота (постоянная клавиатура под полем ввода).
+    """Главное меню VK-бота — 1-в-1 как в Telegram.
+
+    Layout:
+        [📆 Расписание] [📝 Дедлайны]
+        [📊 Моя группа] [👤 Профиль]
+
+    Порядок и подписи кнопок совпадают с ``bot/keyboards/reply.py:main_kb``,
+    чтобы пользователь, переходящий между платформами, видел одно меню.
+    «📆 Расписание» открывает сегодняшний день — отдельной кнопки «Сегодня»
+    нет (в Telegram её тоже нет).
 
     Returns:
         JSON-строка клавиатуры для параметра ``keyboard`` в ``message.answer``.
     """
     return (
         Keyboard(one_time=False, inline=False)
-        .add(Text(BTN_TODAY), color=KeyboardButtonColor.PRIMARY)
-        .add(Text(BTN_WEEK), color=KeyboardButtonColor.PRIMARY)
+        .add(Text(BTN_SCHEDULE), color=KeyboardButtonColor.PRIMARY)
+        .add(Text(BTN_DEADLINES), color=KeyboardButtonColor.PRIMARY)
         .row()
-        .add(Text(BTN_DEADLINES), color=KeyboardButtonColor.SECONDARY)
+        .add(Text(BTN_MY_GROUP), color=KeyboardButtonColor.SECONDARY)
         .add(Text(BTN_PROFILE), color=KeyboardButtonColor.SECONDARY)
     ).get_json()
 
 
 def schedule_kb() -> str:
-    """Клавиатура экрана расписания (без «Дедлайнов»).
+    """Клавиатура экрана расписания: то же меню, что и ``main_kb``.
 
-    Отдельная клавиатура нужна там, где раздел ещё не реализован: не показываем
-    кнопку, которая уводит в заглушку.
+    Раньше здесь не было «Дедлайнов» (раздел был заглушкой). Теперь раздел
+    работает, поэтому набор кнопок совпадает с главным меню — как в Telegram,
+    где экран расписания показывается с тем же reply-меню.
     """
-    return (
-        Keyboard(one_time=False, inline=False)
-        .add(Text(BTN_TODAY), color=KeyboardButtonColor.PRIMARY)
-        .add(Text(BTN_WEEK), color=KeyboardButtonColor.PRIMARY)
-        .row()
-        .add(Text(BTN_PROFILE), color=KeyboardButtonColor.SECONDARY)
-    ).get_json()
+    return main_kb()
 
 
 def names_kb(names: list[str]) -> str:

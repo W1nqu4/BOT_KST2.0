@@ -34,16 +34,17 @@ logger = logging.getLogger(__name__)
 # Слова, которыми пользователь отменяет ввод группы.
 CANCEL_WORDS = {"отмена", "cancel", "стоп", "назад", "не надо"}
 
-# Сколько дней показывать в «неделе» (как в Telegram).
-WEEK_DAYS = 6
+# Недельного экрана в VK нет: в Telegram день выбирается навигацией внутри
+# расписания (week_nav_kb), а не отдельной кнопкой. Набор кнопок совпадает,
+# поэтому константы «сколько дней в неделе» здесь больше не нужно.
 
 # Кнопки меню: по ним состояние ввода группы не должно перехватывать нажатие.
 MENU_TEXTS = {
-    keyboards.BTN_TODAY, "Сегодня", "сегодня",
-    keyboards.BTN_WEEK, "Неделя", "неделя",
-    keyboards.BTN_PROFILE, "Профиль", "профиль",
+    keyboards.BTN_SCHEDULE, "Расписание", "расписание",
     keyboards.BTN_DEADLINES, "Дедлайны", "дедлайны",
-    "/start", "start", "начать", "/link", "/unlink",
+    keyboards.BTN_MY_GROUP, "Моя группа", "моя группа",
+    keyboards.BTN_PROFILE, "Профиль", "профиль",
+    "/start", "start", "начать", "/link", "/unlink", "/mygroup",
     # Команды преподавателя: под состояние ввода группы/фамилии они попадать
     # не должны — иначе «/teacher_cancel» ушёл бы в поиск по справочнику.
     "/teacher_apply", "teacher_apply", "/teacher_status", "teacher_status",
@@ -508,9 +509,43 @@ def register_handlers(bot: Bot, conn) -> None:
                 status=teacher_names.status_rus(str(teacher["status"])),
             ))
 
+    # --- моя группа ---
+
+    @bot.on.message(text=[keyboards.BTN_MY_GROUP, "Моя группа", "моя группа",
+                          "/mygroup", "mygroup"])
+    async def my_group_handler(message: Message) -> None:
+        """Раздел «📊 Моя группа»: карточка группы со списком студентов.
+
+        Своя учебная группа живёт в Telegram (``students.tg_id``), поэтому
+        сначала нужна связка vk_id → tg_id: без неё староста не определится,
+        и код приглашения показывать некому. Раскладка ответа повторяет
+        TG-экран «Моя группа».
+        """
+        vk_id = message.from_id
+        student = storage.get_student_by_vk(conn, vk_id)
+
+        if student is None:
+            # Различаем два случая: совсем нет связки и связка есть, но код
+            # приглашения в TG ещё не введён — подсказки разные.
+            if storage.get_linked_tg_id(conn, vk_id) is None:
+                await message.answer(texts.MY_GROUP_NO_LINK)
+            else:
+                await message.answer(texts.MY_GROUP_NOT_REGISTERED)
+            return
+
+        group_name = str(student["group_name"])
+        snapshot = storage.group_snapshot(conn, group_name)
+        is_admin = storage.role_of(student) in storage.GROUP_ADMIN_ROLES
+
+        await send_text(
+            message,
+            view.render_my_group(snapshot, is_admin=is_admin),
+            keyboard=keyboards.main_kb(),
+        )
+
     # --- расписание ---
 
-    @bot.on.message(text=["📆 Сегодня", "Сегодня", "сегодня"])
+    @bot.on.message(text=[keyboards.BTN_SCHEDULE, "Расписание", "расписание"])
     async def today_handler(message: Message) -> None:
         """Расписание на сегодня (в воскресенье — на понедельник)."""
         group = await _require_group(message)
@@ -518,17 +553,9 @@ def register_handlers(bot: Bot, conn) -> None:
             return
         await send_schedule(message, group, date.today())
 
-    @bot.on.message(text=["📅 Неделя", "Неделя", "неделя"])
-    async def week_handler(message: Message) -> None:
-        """Расписание на 6 дней подряд, начиная с сегодняшнего."""
-        group = await _require_group(message)
-        if group is None:
-            return
-        await send_week(message, group, date.today())
-
     # --- профиль ---
 
-    @bot.on.message(text=["👤 Профиль", "Профиль", "профиль"])
+    @bot.on.message(text=[keyboards.BTN_PROFILE, "Профиль", "профиль"])
     async def profile_handler(message: Message) -> None:
         """Имя, группа и статус связки с Telegram."""
         vk_id = message.from_id
@@ -600,8 +627,3 @@ def register_handlers(bot: Bot, conn) -> None:
             view.render_day(group, target, lessons),
             keyboard=keyboards.schedule_kb(),
         )
-
-    async def send_week(message: Message, group: str, start: date) -> None:
-        """Отправить расписание на WEEK_DAYS дней (режется по лимиту VK)."""
-        for chunk in view.render_week(conn, group, start, days=WEEK_DAYS):
-            await send_text(message, chunk, keyboard=keyboards.schedule_kb())

@@ -330,3 +330,123 @@ def cancel_teacher_application(conn: sqlite3.Connection, tg_id: int) -> bool:
     from bot.db import cancel_teacher_application as _cancel
 
     return _cancel(conn, tg_id)
+
+
+# --- учебная группа (раздел «📊 Моя группа») ---
+#
+# Читаем таблицы ``study_groups`` и ``students`` ПРЯМЫМ SQL, а не через
+# :mod:`bot.attendance.db`. Причина: пакет ``bot.attendance`` импортирует
+# aiogram в своём ``__init__`` (там лежат хендлеры), и обращение к нему из
+# ``bot_vk`` подняло бы весь Telegram-стек в процессе VK-бота. Те же таблицы
+# и тот же порядок строк, что в ``bot/attendance/db.py``, поэтому данные
+# видны одинаково на обеих платформах.
+#
+# У VK-пользователя нет своего tg_id, поэтому «свой» студент определяется по
+# связке vk_id → tg_id (``students.tg_id`` — Telegram id). Без связки студент
+# не может быть ни старостой, ни замом: показываем приглашение привязать TG.
+
+# Роли студентов (совпадают с bot/attendance/models.py).
+ROLE_STUDENT = "student"
+ROLE_DEPUTY = "deputy"
+ROLE_STAROSTA = "starosta"
+
+# Роли, которым показываем код приглашения (совпадают с MANAGE_ROLES в TG).
+GROUP_ADMIN_ROLES = frozenset({ROLE_STAROSTA, ROLE_DEPUTY})
+
+
+def get_study_group(conn: sqlite3.Connection, group_name: str) -> dict | None:
+    """Учебная группа (``study_groups``) по имени или None.
+
+    Returns:
+        Словарь с ``group_name``, ``invite_code``, ``starosta_tg_id``,
+        ``deputy_tg_id``, ``created_at``, ``created_by``.
+    """
+    row = conn.execute(
+        "SELECT * FROM study_groups WHERE group_name = ?", (group_name,)
+    ).fetchone()
+    return dict(row) if row is not None else None
+
+
+def get_group_students(conn: sqlite3.Connection,
+                       group_name: str) -> list[dict]:
+    """Студенты учебной группы по алфавиту (как в Telegram).
+
+    Returns:
+        Список словарей ``students``: ``tg_id``, ``group_name``, ``full_name``,
+        ``role``, ``joined_at``.
+    """
+    rows = conn.execute(
+        "SELECT * FROM students WHERE group_name = ?"
+        " ORDER BY full_name COLLATE NOCASE, tg_id",
+        (group_name,),
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def get_student(conn: sqlite3.Connection, tg_id: int) -> dict | None:
+    """Студент учебной группы по Telegram id или None."""
+    row = conn.execute(
+        "SELECT * FROM students WHERE tg_id = ?", (tg_id,)
+    ).fetchone()
+    return dict(row) if row is not None else None
+
+
+def get_student_by_vk(conn: sqlite3.Connection, vk_id: int) -> dict | None:
+    """Студент учебной группы для этого VK-пользователя (или None).
+
+    None означает «не в группе»: либо нет связки с TG, либо связанный
+    Telegram-аккаунт ещё не ввёл код приглашения.
+    """
+    tg_id = get_linked_tg_id(conn, vk_id)
+    if tg_id is None:
+        return None
+    return get_student(conn, tg_id)
+
+
+def role_of(student: dict | None) -> str:
+    """Роль студента (``student``/``deputy``/``starosta``)."""
+    if not student:
+        return ROLE_STUDENT
+    return str(student.get("role") or ROLE_STUDENT)
+
+
+def is_group_admin(conn: sqlite3.Connection, vk_id: int) -> bool:
+    """Является ли VK-пользователь старостой или замом своей группы."""
+    return role_of(get_student_by_vk(conn, vk_id)) in GROUP_ADMIN_ROLES
+
+
+def student_name_by_tg(conn: sqlite3.Connection, tg_id: int | None) -> str:
+    """ФИО студента по Telegram id (пустая строка, если его нет).
+
+    Нужно для строк «Староста: …» / «Зам: …»: в ``study_groups`` лежит только
+    tg_id, а показывать надо имя.
+    """
+    if tg_id is None:
+        return ""
+    student = get_student(conn, int(tg_id))
+    return str(student["full_name"]) if student else ""
+
+
+def group_snapshot(conn: sqlite3.Connection, group_name: str) -> dict:
+    """Всё для карточки группы одним вызовом: счётчики, роли, код.
+
+    Собирает данные в одном месте, чтобы хендлер VK не ходил в БД пять раз и
+    не дублировал логику связей (староста/зам лежат и в ``study_groups``, и в
+    ``students.role``).
+
+    Returns:
+        Словарь ``{'group_name', 'count', 'students', 'starosta_name',
+        'deputy_name', 'invite_code', 'mode'}``; пустые значения, если группы
+        нет.
+    """
+    group = get_study_group(conn, group_name) or {}
+    students = get_group_students(conn, group_name)
+    return {
+        "group_name": group_name,
+        "count": len(students),
+        "students": students,
+        "starosta_name": student_name_by_tg(conn, group.get("starosta_tg_id")),
+        "deputy_name": student_name_by_tg(conn, group.get("deputy_tg_id")),
+        "invite_code": str(group.get("invite_code") or ""),
+        "mode": str(group.get("attendance_mode") or "chat"),
+    }

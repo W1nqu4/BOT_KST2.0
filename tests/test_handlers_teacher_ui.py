@@ -5,7 +5,7 @@
 свой сценарий отметки.
 """
 
-from datetime import date
+from datetime import date, timedelta
 
 import pytest
 from aiogram.types import CallbackQuery, Chat, Message, Update, User
@@ -26,6 +26,11 @@ FIO = "Богатырева Ирина Павловна"
 OTHER_FIO = "Виссарионова Анна Сергеевна"
 GROUP = "25КАД"
 OTHER_GROUP = "26ИМС1"
+
+# Понедельник, на который в кэше лежат пары (``day_of_week = 1``).
+# Дата фиксированная, а не «ближайший понедельник»: тест должен одинаково
+# проходить в любой день недели, иначе он зависит от дня прогона.
+MONDAY = date(2026, 10, 5)
 
 
 def _settings() -> Settings:
@@ -174,8 +179,56 @@ async def test_start_for_student_not_hijacked(dp, conn) -> None:
 
 # --- /my_lessons ---
 
-async def test_my_lessons_for_teacher(dp, conn) -> None:
-    """Преподаватель получает расписание на несколько дней."""
+def test_frozen_date_is_independent_of_run_day(monkeypatch) -> None:
+    """Фиксация даты не зависит от дня прогона.
+
+    Проверяем сам механизм: после :func:`_freeze_today` модуль видит ровно
+    заданный понедельник, а арифметика ``timedelta`` продолжает работать
+    (в окне рендера есть день с парами при любом реальном дне недели).
+    """
+    _freeze_today(monkeypatch, MONDAY)
+
+    assert teacher_ui.date.today() == MONDAY
+    assert teacher_ui.date.today().isoweekday() == 1, "фиксируем понедельник"
+    assert (teacher_ui.date.today() + timedelta(days=1)) == date(2026, 10, 6)
+
+
+def _freeze_today(monkeypatch: pytest.MonkeyPatch, fixed: date) -> None:
+    """Заморозить ``date.today()`` в модуле ``teacher_ui`` на заданный день.
+
+    Подменяем не сам класс ``date`` вообще, а привязку внутри модуля:
+    ``teacher_ui.date`` — это класс, полученный через ``from datetime import
+    date``. Поэтому подставляем подкласс с переопределённым ``today()``: так
+    сохраняются и арифметика с ``timedelta`` (она возвращает обычный ``date``),
+    и ``isinstance``-проверки.
+
+    Патчим только этот модуль и только внутри одного теста: обработчики
+    посещаемости тоже читают ``date.today()`` и должны видеть реальный день,
+    иначе отметки, вставленные тестом, перестанут находиться.
+
+    Args:
+        monkeypatch: фикстура pytest.
+        fixed: день, который должен возвращать ``date.today()``.
+    """
+
+    class _FrozenDate(date):
+        @classmethod
+        def today(cls) -> date:
+            return fixed
+
+    monkeypatch.setattr(teacher_ui, "date", _FrozenDate)
+
+
+async def test_my_lessons_for_teacher(dp, conn, monkeypatch) -> None:
+    """Преподаватель получает расписание на несколько дней.
+
+    Дату фиксируем на понедельник: пары в кэше лежат на ``day_of_week = 1``,
+    а окно рендера — ``WEEK_DAYS`` дней от «сегодня». Без фиксации тест
+    проходил бы только по понедельникам: в остальные дни окно не содержало бы
+    дня с парами, и проверки группы и кабинета падали бы.
+    """
+    _freeze_today(monkeypatch, MONDAY)
+
     bot = FakeBot()
     await dp.feed_update(bot, _update("/my_lessons", TEACHER_ID))
 

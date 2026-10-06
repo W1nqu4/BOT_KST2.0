@@ -19,7 +19,7 @@ from bot.services.schedule_service import (
     time_range_for_date,
     week_type_for_date,
 )
-from bot_vk import texts
+from bot_vk import storage, texts
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +60,74 @@ def lesson_icon(lesson: dict) -> str:
     if lesson.get("is_substitution"):
         return ICON_SUBSTITUTION
     return ICON_PLANNED
+
+
+def render_my_group(snapshot: dict, *, is_admin: bool = False,
+                    limit: int = texts.MY_GROUP_LIST_LIMIT) -> str:
+    """Карточка учебной группы — plain text, по образцу TG.
+
+    Формат повторяет ``bot/attendance/texts.group_card`` + ``group_list``, но
+    без HTML: в VK разметка не нужна. Отличия по существу два:
+
+    - код приглашения показываем только старосте и заму (``is_admin``) — как
+      в Telegram, где кнопка «Список группы» с кодом есть лишь у них;
+    - длинный список режется: VK ограничивает длину сообщения, и «… и ещё N»
+      честнее, чем обрезанный на середине ответ.
+
+    Args:
+        snapshot: результат :func:`bot_vk.storage.group_snapshot`.
+        is_admin: показывать ли код приглашения.
+        limit: сколько ФИО печатать перед «и ещё N».
+
+    Returns:
+        Готовый текст сообщения.
+    """
+    students = snapshot.get("students") or []
+    starosta = str(snapshot.get("starosta_name") or "")
+    deputy = str(snapshot.get("deputy_name") or "")
+
+    if starosta and deputy:
+        roles = texts.MY_GROUP_ROLES.format(starosta=starosta, deputy=deputy)
+    elif starosta:
+        roles = texts.MY_GROUP_STAROSTA_ONLY.format(starosta=starosta)
+    else:
+        # Группа создана, но староста не записан: не выдумываем строку.
+        roles = ""
+
+    code = str(snapshot.get("invite_code") or "")
+    invite = (texts.MY_GROUP_INVITE.format(code=code)
+              if is_admin and code else "")
+
+    body = texts.MY_GROUP_CARD.format(
+        group=snapshot.get("group_name") or "?",
+        count=int(snapshot.get("count") or 0),
+        roles=roles,
+        invite=invite,
+    )
+
+    if not students:
+        return body + texts.MY_GROUP_EMPTY
+
+    shown = students[:limit]
+    lines = []
+    for student in shown:
+        name = str(student.get("full_name") or "?")
+        # Роль печатаем иконкой, как в TG (там «— ⭐ староста»); в списке
+        # достаточно пометки, чтобы не дублировать длинные подписи.
+        role = storage.role_of(student)
+        if role == storage.ROLE_STAROSTA:
+            name += " — ⭐ староста"
+        elif role == storage.ROLE_DEPUTY:
+            name += " — ⭐ зам"
+        lines.append(f"• {name}")
+
+    body += texts.MY_GROUP_LIST_HEADER
+    body += "\n" + "\n".join(lines)
+
+    rest = len(students) - len(shown)
+    if rest > 0:
+        body += texts.MY_GROUP_LIST_MORE.format(rest=rest)
+    return body
 
 
 def lessons_with_substitutions(conn, group: str, target: date) -> list[dict]:

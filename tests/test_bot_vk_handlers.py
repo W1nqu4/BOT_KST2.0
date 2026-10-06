@@ -15,7 +15,7 @@ import pytest
 
 from bot.db import get_connection
 from bot.migrations import apply_migrations
-from bot_vk import storage, texts
+from bot_vk import keyboards, storage, texts
 from bot_vk.handlers import UserState, register_handlers
 
 GROUP_ID = 987654321
@@ -262,7 +262,7 @@ async def test_start_with_group_shows_menu(vk) -> None:
     assert keyboard, "должна прийти клавиатура главного меню"
     # Клавиатура приходит JSON-строкой; разбираем её и смотрим подписи кнопок.
     labels = keyboard_labels(keyboard)
-    assert any("Сегодня" in label for label in labels), labels
+    assert any("Расписание" in label for label in labels), labels
     assert any("Профиль" in label for label in labels), labels
 
 
@@ -273,7 +273,7 @@ async def test_today_shows_schedule(vk) -> None:
     _bot, _api, conn = vk
     storage.save_user_group(conn, VK_ID, GROUP)
 
-    answers = await send(vk, "📆 Сегодня")
+    answers = await send(vk, keyboards.BTN_SCHEDULE)
     joined = "\n".join(answers)
 
     assert GROUP in joined, answers
@@ -284,7 +284,7 @@ async def test_today_without_group_asks_for_it(vk) -> None:
     """Без группы расписание не показываем — просим указать группу."""
     bot, _api, _conn = vk
 
-    answers = await send(vk, "📆 Сегодня")
+    answers = await send(vk, keyboards.BTN_SCHEDULE)
 
     assert any(texts.NO_GROUP_HINT == a for a in answers), answers
     assert any(texts.ASK_GROUP == a for a in answers), answers
@@ -292,17 +292,38 @@ async def test_today_without_group_asks_for_it(vk) -> None:
     assert peer_state is not None and peer_state.state == UserState.waiting_group
 
 
-async def test_week_shows_multiple_days(vk) -> None:
-    """«📅 Неделя» отдаёт расписание на несколько дней подряд."""
+async def test_schedule_shows_one_day_not_week(vk) -> None:
+    """«📆 Расписание» отдаёт ОДИН день — как в Telegram.
+
+    Отдельной кнопки «Неделя» больше нет: в TG день выбирается навигацией
+    внутри экрана расписания. Проверяем, что нажатие кнопки не рассылает
+    недельный дайджест (заголовка недели в ответе быть не должно).
+    """
     _bot, _api, conn = vk
     storage.save_user_group(conn, VK_ID, GROUP)
 
-    answers = await send(vk, "📅 Неделя")
+    answers = await send(vk, keyboards.BTN_SCHEDULE)
     joined = "\n".join(answers)
 
-    assert texts.WEEK_HEADER.format(group=GROUP) in joined, answers
-    # 7 = заголовок недели + шесть шапок дней.
-    assert joined.count("🎓") >= 7, answers
+    assert GROUP in joined, answers
+    assert texts.WEEK_HEADER.format(group=GROUP) not in joined, answers
+    # Шапка одного дня содержит группу и чётность числа.
+    assert "🎓" in joined, answers
+
+
+async def test_week_button_is_gone(vk) -> None:
+    """Подписи «📅 Неделя» и «📆 Сегодня» больше не обрабатываются.
+
+    Если бы они остались в правилах, меню разъехалось бы с Telegram: там таких
+    кнопок нет. Текст должен уходить в fallback, а не показывать неделю.
+    """
+    _bot, _api, conn = vk
+    storage.save_user_group(conn, VK_ID, GROUP)
+
+    for stale in ("📅 Неделя", "📆 Сегодня"):
+        answers = await send(vk, stale)
+        joined = "\n".join(answers)
+        assert texts.FALLBACK == joined.strip(), (stale, answers)
 
 
 # --- профиль ---
@@ -640,7 +661,7 @@ async def test_menu_button_works_with_stuck_state(vk) -> None:
     storage.save_user_group(conn, VK_ID, GROUP)
     await bot.state_dispenser.set(VK_ID, UserState.waiting_group)
 
-    answers = await send(vk, "📆 Сегодня")
+    answers = await send(vk, keyboards.BTN_SCHEDULE)
 
     assert answers, "кнопка обязана сработать"
     joined = "\n".join(answers)
@@ -664,7 +685,7 @@ async def test_all_answers_have_keyboard_where_expected(vk) -> None:
     _bot, api, conn = vk
     storage.save_user_group(conn, VK_ID, GROUP)
 
-    for text in ("/start", "📆 Сегодня", "👤 Профиль", "абракадабра"):
+    for text in ("/start", keyboards.BTN_SCHEDULE, "👤 Профиль", "абракадабра"):
         api.messages.sent.clear()
         await send(vk, text)
         keyboards_sent = [m for m in api.messages.sent if m.get("keyboard")]
@@ -681,8 +702,8 @@ async def test_keyboard_json_is_valid_and_labelled(vk) -> None:
                     if m.get("keyboard"))
 
     labels = keyboard_labels(keyboard)
-    assert any("Сегодня" in label for label in labels), labels
-    assert any("Неделя" in label for label in labels), labels
+    assert any("Расписание" in label for label in labels), labels
+    assert any("Моя группа" in label for label in labels), labels
     assert any("Профиль" in label for label in labels), labels
 
 
@@ -768,7 +789,7 @@ async def test_schedule_arrives_when_keyboard_rejected(rejecting_vk) -> None:
     bot, api, conn = rejecting_vk
     storage.save_user_group(conn, VK_ID, GROUP)
 
-    await bot.process_event(make_event("📆 Сегодня"))
+    await bot.process_event(make_event(keyboards.BTN_SCHEDULE))
 
     joined = "\n".join(api.messages.accepted)
     assert joined, "расписание обязано дойти"

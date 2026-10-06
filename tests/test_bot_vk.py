@@ -14,6 +14,7 @@ from unittest.mock import Mock
 import pytest
 
 import bot_vk.config as vk_config
+from bot_vk import keyboards
 from bot_vk.config import validate
 from bot_vk.handlers import register_handlers
 
@@ -105,8 +106,8 @@ def test_register_handlers_registers_commands() -> None:
         "process_teacher_name",
         "teacher_status_handler",
         "teacher_cancel_handler",
+        "my_group_handler",
         "today_handler",
-        "week_handler",
         "profile_handler",
         "fallback",
     ]
@@ -149,7 +150,7 @@ def test_teacher_name_state_skips_commands() -> None:
     assert is_group_input(FakeMessage("Богатырева")) is True
     assert is_group_input(FakeMessage("/teacher_cancel")) is False
     assert is_group_input(FakeMessage("/teacher_status")) is False
-    assert is_group_input(FakeMessage("📆 Сегодня")) is False
+    assert is_group_input(FakeMessage(keyboards.BTN_SCHEDULE)) is False
 
 
 def test_fallback_is_registered_last() -> None:
@@ -206,7 +207,7 @@ def test_process_group_rule_binds_state() -> None:
 
     assert is_group_input(FakeMessage("25КАД")) is True
     assert is_group_input(FakeMessage("/start")) is False
-    assert is_group_input(FakeMessage("📆 Сегодня")) is False
+    assert is_group_input(FakeMessage(keyboards.BTN_SCHEDULE)) is False
     assert UserState.waiting_group.value == "waiting_group"
     assert looks_like_group("25КАД") is True
 
