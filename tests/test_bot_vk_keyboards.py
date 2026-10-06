@@ -178,3 +178,57 @@ def test_menu_texts_cover_all_buttons() -> None:
 
     for label in vk_labels(keyboards.main_kb()):
         assert label in MENU_TEXTS, f"{label!r} отсутствует в MENU_TEXTS"
+# --- проверки из ТЗ подшага 3 (имена приведены дословно) ---
+
+def test_vk_main_kb_matches_telegram() -> None:
+    """Раскладка VK-клавиатуры должна совпадать с TG.
+
+    Дословная формулировка требования: итоговое меню VK — 1-в-1 как в TG.
+    Сравниваем и текст подписей, и порядок, и разбивку по рядам (2×2), потому
+    что «похожее» меню здесь не годится: пользователь ходит между платформами.
+    """
+    from bot.keyboards.reply import main_kb as tg_kb
+    from bot_vk.keyboards import main_kb as vk_kb
+
+    assert vk_rows(vk_kb()) == tg_rows(tg_kb())
+    assert vk_rows(vk_kb()) == [
+        ["📆 Расписание", "📝 Дедлайны"],
+        ["📊 Моя группа", "👤 Профиль"],
+    ]
+
+
+def test_vk_schedule_kb_is_main_kb() -> None:
+    """В VK экран расписания идёт с тем же меню, что и /start.
+
+    В Telegram день выбирается навигацией внутри расписания, отдельного меню
+    для него нет — поэтому VK-версия возвращает главную клавиатуру, а не
+    урезанный набор.
+    """
+    from bot_vk.keyboards import main_kb as vk_kb
+    from bot_vk.keyboards import schedule_kb
+
+    assert schedule_kb() == vk_kb()
+    assert vk_labels(schedule_kb()) == vk_labels(vk_kb())
+
+
+def test_vk_has_no_legacy_buttons() -> None:
+    """Кнопок «📅 Сегодня» и «📅 Неделя» в VK больше нет.
+
+    В TG таких кнопок нет, поэтому их присутствие ломало бы паритет. Проверяем
+    три уровня: константы, подписи клавиатуры и правила хендлеров — старая
+    подпись могла бы остаться в любом из них.
+    """
+    import inspect
+
+    from bot_vk import handlers
+
+    assert not hasattr(keyboards, "BTN_TODAY"), "константа BTN_TODAY удалена"
+    assert not hasattr(keyboards, "BTN_WEEK"), "константа BTN_WEEK удалена"
+
+    labels = vk_labels(keyboards.main_kb()) + vk_labels(keyboards.schedule_kb())
+    assert not any("Сегодня" in label for label in labels), labels
+    assert not any("Неделя" in label for label in labels), labels
+
+    source = inspect.getsource(handlers.register_handlers)
+    for stale in ("📅 Сегодня", "📆 Сегодня", "📅 Неделя"):
+        assert stale not in source, f"в правилах осталась старая кнопка {stale!r}"
