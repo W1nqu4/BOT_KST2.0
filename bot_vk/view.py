@@ -62,6 +62,84 @@ def lesson_icon(lesson: dict) -> str:
     return ICON_PLANNED
 
 
+def render_deadlines(items: list[dict], today: date | None = None) -> str:
+    """Список дедлайнов с группировкой по срочности — plain text.
+
+    Повторяет TG-экран (:func:`bot.handlers.deadlines.render_deadlines`), но без
+    HTML. Группировка берётся из общего сервиса
+    (:func:`bot.services.deadline_service.group_by_urgency`): он aiogram-free,
+    поэтому логика срочности одна на оба бота — «🔴 Просрочено», «🟠 Сегодня»,
+    «🟡 Завтра», «⚪ Позже» и «⚪ Без даты».
+
+    Args:
+        items: активные дедлайны из ``deadline_service.list_active``.
+        today: база отсчёта (для тестов).
+
+    Returns:
+        Готовый текст сообщения.
+    """
+    from bot.services import deadline_service as dl
+
+    if not items:
+        return texts.DEADLINES_EMPTY
+
+    lines = [texts.DEADLINES_HEADER, ""]
+    for emoji, title, chunk in dl.group_by_urgency(items, today):
+        lines.append(f"{emoji} {title}")
+        for item in chunk:
+            lines.append(render_deadline_line(item, today))
+        lines.append("")
+    return "\n".join(lines).rstrip()
+
+
+def render_deadline_line(item: dict, today: date | None = None) -> str:
+    """Строка одного дедлайна: ``• Задача — Предмет, 15.10 — сегодня``.
+
+    Args:
+        item: словарь дедлайна (может содержать ``days_left``).
+        today: база отсчёта (для тестов).
+
+    Returns:
+        Строка без ведущего перевода строки.
+    """
+    from bot.services import deadline_service as dl
+
+    task = str(item.get("task") or texts.DEADLINE_NO_TASK).strip()
+    subject = str(item.get("subject") or "").strip()
+    teacher = str(item.get("teacher") or "").strip()
+    date_iso = item.get("deadline_date")
+
+    detail = subject
+    if teacher:
+        detail = f"{detail} ({teacher})" if detail else f"({teacher})"
+    if date_iso:
+        try:
+            pretty = date.fromisoformat(str(date_iso)).strftime("%d.%m")
+        except ValueError:
+            pretty = str(date_iso)
+        detail = f"{detail}, {pretty}" if detail else pretty
+
+    remaining = item.get("days_left")
+    if remaining is None:
+        remaining = dl.days_left(date_iso, today)
+
+    when = ""
+    if remaining is None:
+        when = texts.DEADLINE_NO_DATE
+    elif remaining < 0:
+        when = texts.DEADLINE_DAYS_AGO.format(days=abs(remaining))
+    elif remaining == 0:
+        when = texts.DEADLINE_TODAY
+    elif remaining == 1:
+        when = texts.DEADLINE_TOMORROW
+
+    return texts.DEADLINE_LINE.format(
+        task=task,
+        detail=f" — {detail}" if detail else "",
+        when=when,
+    )
+
+
 def render_my_group(snapshot: dict, *, is_admin: bool = False,
                     limit: int = texts.MY_GROUP_LIST_LIMIT) -> str:
     """Карточка учебной группы — plain text, по образцу TG.

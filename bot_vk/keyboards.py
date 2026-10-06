@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from vkbottle import Callback, Keyboard, KeyboardButtonColor, Text
 
+from bot_vk import texts
+
 # Подписи кнопок. Иконка входит в текст: VK присылает нажатие именно как
 # текст кнопки, поэтому «📆 Расписание» и «Расписание» — разные строки.
 #
@@ -67,6 +69,79 @@ def schedule_kb() -> str:
     где экран расписания показывается с тем же reply-меню.
     """
     return main_kb()
+
+
+# Payload кнопок дедлайнов: {"c": "dl", "a": "add"|"del"|"list"|"cancel",
+# "i": <id дедлайна для удаления>}. Как и у заявки преподавателя, данные идут
+# payload-ом (событие message_event), а не текстом кнопки.
+DEADLINE_CB_FIELD = "c"
+DEADLINE_CB_VALUE = "dl"
+DEADLINE_CB_ACTION = "a"
+DEADLINE_CB_ID = "i"
+
+# Действия раздела дедлайнов.
+DEADLINE_ACTION_ADD = "add"
+DEADLINE_ACTION_DELETE = "del"
+DEADLINE_ACTION_LIST = "list"
+DEADLINE_ACTION_CANCEL = "cancel"
+
+
+def deadlines_kb() -> str:
+    """Inline-клавиатура списка дедлайнов: «Добавить» и «Удалить».
+
+    Как в Telegram (``deadline_list_kb``): два действия одним рядом. В VK ряд
+    ограничен пятью кнопками, здесь их две — с запасом.
+    """
+    return (
+        Keyboard(one_time=False, inline=True)
+        .add(Callback(texts.BTN_DL_ADD,
+                      payload={DEADLINE_CB_FIELD: DEADLINE_CB_VALUE,
+                               DEADLINE_CB_ACTION: DEADLINE_ACTION_ADD}))
+        .add(Callback(texts.BTN_DL_DELETE,
+                      payload={DEADLINE_CB_FIELD: DEADLINE_CB_VALUE,
+                               DEADLINE_CB_ACTION: DEADLINE_ACTION_DELETE}))
+    ).get_json()
+
+
+# Сколько дедлайнов показывать кнопками удаления. Предел VK — 10 рядов на
+# клавиатуру, а каждый дедлайн занимает свой ряд (плюс ряд «К списку»).
+# 9 задач + «К списку» = 10 рядов, ровно на пределе; больше — и VK отвергнет
+# всё сообщение целиком, поэтому список честно урезаем.
+DEADLINE_DELETE_LIMIT = 9
+
+
+def deadline_delete_kb(items: list[dict]) -> str:
+    """Inline-клавиатура удаления: по кнопке на дедлайн + «К списку».
+
+    Подпись кнопки — название задачи (обрезаем до 35 символов: VK режет
+    длинные подписи сам, но обрезка на нашей стороне предсказуемее).
+    ``id`` уходит в payload, поэтому обрезка подписи ничего не ломает.
+
+    Args:
+        items: список дедлайнов (``id`` и ``task``).
+
+    Returns:
+        JSON-строка клавиатуры. Не больше
+        :data:`DEADLINE_DELETE_LIMIT` дедлайнов — иначе клавиатура не влезет
+        в лимит VK и сообщение не дойдёт.
+    """
+    keyboard = Keyboard(one_time=False, inline=True)
+    for item in items[:DEADLINE_DELETE_LIMIT]:
+        task = str(item.get("task") or texts.DEADLINE_NO_TASK).strip()
+        label = task if len(task) <= 35 else task[:34] + "…"
+        keyboard.add(Callback(
+            f"🗑 {label}",
+            payload={DEADLINE_CB_FIELD: DEADLINE_CB_VALUE,
+                     DEADLINE_CB_ACTION: DEADLINE_ACTION_DELETE,
+                     DEADLINE_CB_ID: int(item["id"])},
+        )).row()
+
+    keyboard.add(Callback(
+        texts.BTN_DL_LIST,
+        payload={DEADLINE_CB_FIELD: DEADLINE_CB_VALUE,
+                 DEADLINE_CB_ACTION: DEADLINE_ACTION_LIST},
+    ))
+    return keyboard.get_json()
 
 
 def names_kb(names: list[str]) -> str:

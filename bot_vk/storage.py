@@ -450,3 +450,66 @@ def group_snapshot(conn: sqlite3.Connection, group_name: str) -> dict:
         "invite_code": str(group.get("invite_code") or ""),
         "mode": str(group.get("attendance_mode") or "chat"),
     }
+# --- дедлайны ---
+#
+# Дедлайны общие с Telegram: строки таблицы ``deadlines`` привязаны к ``tg_id``,
+# поэтому у VK-пользователя работает только со связкой vk_id → tg_id. Так
+# студент заводит дедлайн в TG и видит его в VK (и наоборот) — это и есть
+# «полный паритет», ради которого связка и делалась.
+#
+# Логика (срочность, разбор дат, soft delete) живёт в
+# :mod:`bot.services.deadline_service` — он aiogram-free, поэтому VK его
+# переиспользует напрямую, без копии правил.
+
+def deadlines_tg_id(conn: sqlite3.Connection, vk_id: int) -> int | None:
+    """Telegram id для работы с дедлайнами (или None без связки)."""
+    return get_linked_tg_id(conn, vk_id)
+
+
+def list_deadlines(conn: sqlite3.Connection, tg_id: int) -> list[dict]:
+    """Активные дедлайны пользователя, отсортированные по сроку."""
+    from bot.services import deadline_service
+
+    return deadline_service.list_active(conn, tg_id)
+
+
+def add_deadline(conn: sqlite3.Connection, tg_id: int, subject: str,
+                 teacher: str, task: str, date_iso: str | None) -> int:
+    """Создать дедлайн; возвращает его id."""
+    from bot.services import deadline_service
+
+    return deadline_service.add(conn, tg_id, subject, teacher, task, date_iso)
+
+
+def get_deadline(conn: sqlite3.Connection, deadline_id: int,
+                 tg_id: int) -> dict | None:
+    """Дедлайн по id, принадлежащий пользователю (иначе None).
+
+    Проверка владельца обязательна: id приходит из payload кнопки, а его
+    пользователь может подделать.
+    """
+    from bot.services import deadline_service
+
+    return deadline_service.get(conn, deadline_id, tg_id)
+
+
+def delete_deadline(conn: sqlite3.Connection, deadline_id: int,
+                    tg_id: int) -> bool:
+    """Мягко удалить дедлайн (проставить ``deleted_at``)."""
+    from bot.services import deadline_service
+
+    return deadline_service.soft_delete(conn, deadline_id, tg_id)
+
+
+def parse_deadline_date(text: str) -> str | None:
+    """Разобрать дату, введённую вручную (ДД.ММ.ГГГГ, ДД.ММ.ГГ, ДД.ММ)."""
+    from bot.services import deadline_service
+
+    return deadline_service.parse_manual_date(text)
+
+
+def deadline_days_left(date_iso: str | None) -> int | None:
+    """Сколько дней осталось до срока (отрицательное — просрочено)."""
+    from bot.services import deadline_service
+
+    return deadline_service.days_left(date_iso)

@@ -45,6 +45,7 @@ MENU_TEXTS = {
     keyboards.BTN_MY_GROUP, "Моя группа", "моя группа",
     keyboards.BTN_PROFILE, "Профиль", "профиль",
     "/start", "start", "начать", "/link", "/unlink", "/mygroup",
+    "/deadlines", "deadlines",
     # Команды преподавателя: под состояние ввода группы/фамилии они попадать
     # не должны — иначе «/teacher_cancel» ушёл бы в поиск по справочнику.
     "/teacher_apply", "teacher_apply", "/teacher_status", "teacher_status",
@@ -70,6 +71,14 @@ class TeacherApplyState(BaseStateGroup):
     """Состояния заявки на роль преподавателя."""
 
     waiting_name = "teacher_apply_waiting_name"
+
+
+class DeadlineState(BaseStateGroup):
+    """Состояния добавления дедлайна (три шага, как в Telegram)."""
+
+    waiting_subject = "dl_subject"
+    waiting_task = "dl_task"
+    waiting_date = "dl_date"
 
 
 def parse_link_code(text: str) -> str | None:
@@ -540,6 +549,190 @@ def register_handlers(bot: Bot, conn) -> None:
         await send_text(
             message,
             view.render_my_group(snapshot, is_admin=is_admin),
+            keyboard=keyboards.main_kb(),
+        )
+
+    # --- дедлайны ---
+
+    @bot.on.message(text=[keyboards.BTN_DEADLINES, "Дедлайны", "дедлайны",
+                          "/deadlines", "deadlines"])
+    async def deadlines_handler(message: Message) -> None:
+        """Список дедлайнов. Без связки с TG — просим её оформить.
+
+        Дедлайны хранятся по ``tg_id``, поэтому общие с Telegram: заведённый в
+        TG виден здесь и наоборот. Без связки показывать нечего — у VK-аккаунта
+        нет своего владельца дедлайнов.
+        """
+        tg_id = storage.deadlines_tg_id(conn, message.from_id)
+        if tg_id is None:
+            await send_text(message, texts.DEADLINES_NO_LINK,
+                            keyboard=keyboards.main_kb())
+            return
+
+        items = storage.list_deadlines(conn, tg_id)
+        await send_text(
+            message,
+            view.render_deadlines(items),
+            keyboard=keyboards.deadlines_kb(),
+        )
+
+    @bot.on.raw_event(GroupEventType.MESSAGE_EVENT, dataclass=MessageEvent,
+                      payload_contains={keyboards.DEADLINE_CB_FIELD:
+                                        keyboards.DEADLINE_CB_VALUE})
+    async def deadline_callback(event: MessageEvent) -> None:
+        """Кнопки раздела дедлайнов: добавить, удалить, вернуться к списку.
+
+        Действие различается по полю ``a`` в payload; для удаления конкретного
+        дедлайна в ``i`` приходит его id. Владелец проверяется в
+        :func:`bot_vk.storage.get_deadline` — payload подделывается клиентом.
+        """
+        payload = event.payload or {}
+        action = str(payload.get(keyboards.DEADLINE_CB_ACTION) or "")
+
+        tg_id = storage.deadlines_tg_id(conn, event.user_id)
+        if tg_id is None:
+            await event.send_message(texts.DEADLINES_NO_LINK)
+            return
+
+        if action == keyboards.DEADLINE_ACTION_ADD:
+            await bot.state_dispenser.set(event.peer_id,
+                                          DeadlineState.waiting_subject)
+            await event.send_message(texts.DEADLINE_ASK_SUBJECT)
+            return
+
+        if action == keyboards.DEADLINE_ACTION_LIST:
+            await bot.state_dispenser.delete(event.peer_id)
+            items = storage.list_deadlines(conn, tg_id)
+            await event.send_message(view.render_deadlines(items),
+                                     keyboard=keyboards.deadlines_kb())
+            return
+
+        if action == keyboards.DEADLINE_ACTION_DELETE:
+            raw_id = payload.get(keyboards.DEADLINE_CB_ID)
+            if raw_id is None:
+                # Кнопка «Удалить» из списка — показываем выбор дедлайна.
+                items = storage.list_deadlines(conn, tg_id)
+                if not items:
+                    await event.show_snackbar(texts.DEADLINE_DELETE_EMPTY)
+                    return
+                await event.edit_message(
+                    texts.DEADLINE_DELETE_PROMPT,
+                    keyboard=keyboards.deadline_delete_kb(items),
+                )
+                return
+
+            # Кнопка конкретного дедлайна: удаляем с проверкой владельца.
+            try:
+                deadline_id = int(raw_id)
+            except (TypeError, ValueError):
+                await event.show_snackbar(texts.DEADLINE_STALE)
+                return
+
+            if not storage.delete_deadline(conn, deadline_id, tg_id):
+                await event.show_snackbar(texts.DEADLINE_DELETE_NOT_FOUND)
+                return
+
+            items = storage.list_deadlines(conn, tg_id)
+            await event.edit_message(
+                view.render_deadlines(items),
+                keyboard=keyboards.deadlines_kb(),
+            )
+            await event.show_snackbar(texts.DEADLINE_DELETED)
+            return
+
+        await event.show_snackbar(texts.DEADLINE_STALE)
+
+    @bot.on.message(state=DeadlineState.waiting_subject, func=is_group_input)
+    async def process_deadline_subject(message: Message) -> None:
+        """Шаг 1: название/предмет → шаг 2 (что сделать)."""
+        raw = (message.text or "").strip()
+        if raw.lower() in CANCEL_WORDS:
+            await bot.state_dispenser.delete(message.peer_id)
+            await send_text(message, texts.DEADLINE_CANCELLED,
+                            keyboard=keyboards.main_kb())
+            return
+        if not raw:
+            await message.answer(texts.DEADLINE_ASK_SUBJECT)
+            return
+
+        await bot.state_dispenser.set(message.peer_id,
+                                      DeadlineState.waiting_task,
+                                      dl_subject=raw)
+        await message.answer(texts.DEADLINE_ASK_TASK)
+
+    @bot.on.message(state=DeadlineState.waiting_task, func=is_group_input)
+    async def process_deadline_task(message: Message) -> None:
+        """Шаг 2: что сделать → шаг 3 (дата)."""
+        raw = (message.text or "").strip()
+        if raw.lower() in CANCEL_WORDS:
+            await bot.state_dispenser.delete(message.peer_id)
+            await send_text(message, texts.DEADLINE_CANCELLED,
+                            keyboard=keyboards.main_kb())
+            return
+        if not raw:
+            await message.answer(texts.DEADLINE_ASK_TASK)
+            return
+
+        peer = await bot.state_dispenser.get(message.peer_id)
+        subject = str((peer.payload.get("dl_subject") if peer else "") or "")
+        if not subject:
+            # Состояние потерялось (перезапуск) — начинаем заново.
+            await bot.state_dispenser.set(message.peer_id,
+                                          DeadlineState.waiting_subject)
+            await message.answer(texts.DEADLINE_ASK_SUBJECT)
+            return
+
+        await bot.state_dispenser.set(message.peer_id,
+                                      DeadlineState.waiting_date,
+                                      dl_subject=subject, dl_task=raw)
+        await message.answer(texts.DEADLINE_ASK_DATE)
+
+    @bot.on.message(state=DeadlineState.waiting_date, func=is_group_input)
+    async def process_deadline_date(message: Message) -> None:
+        """Шаг 3: дата (или «нет») → создаём дедлайн."""
+        raw = (message.text or "").strip()
+        if raw.lower() in CANCEL_WORDS:
+            await bot.state_dispenser.delete(message.peer_id)
+            await send_text(message, texts.DEADLINE_CANCELLED,
+                            keyboard=keyboards.main_kb())
+            return
+
+        # «нет»/«-» — дедлайн без даты (в TG это отдельная кнопка).
+        if raw.lower() in {"нет", "не", "no", "-", "б/д"}:
+            date_iso: str | None = None
+        else:
+            date_iso = storage.parse_deadline_date(raw)
+            if date_iso is None:
+                await message.answer(texts.DEADLINE_BAD_DATE)
+                return
+
+        peer = await bot.state_dispenser.get(message.peer_id)
+        data = peer.payload if peer else {}
+        subject = str(data.get("dl_subject") or "")
+        task = str(data.get("dl_task") or "")
+
+        if not task:
+            await bot.state_dispenser.set(message.peer_id,
+                                          DeadlineState.waiting_subject)
+            await message.answer(texts.DEADLINE_ASK_SUBJECT)
+            return
+
+        tg_id = storage.deadlines_tg_id(conn, message.from_id)
+        if tg_id is None:
+            await bot.state_dispenser.delete(message.peer_id)
+            await message.answer(texts.DEADLINES_NO_LINK)
+            return
+
+        storage.add_deadline(conn, tg_id, subject, "", task, date_iso)
+        await bot.state_dispenser.delete(message.peer_id)
+
+        item = {
+            "task": task, "subject": subject, "teacher": "",
+            "deadline_date": date_iso,
+        }
+        await send_text(
+            message,
+            texts.DEADLINE_ADDED.format(line=view.render_deadline_line(item)),
             keyboard=keyboards.main_kb(),
         )
 
